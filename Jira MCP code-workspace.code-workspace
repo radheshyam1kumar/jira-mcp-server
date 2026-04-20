@@ -1,0 +1,19 @@
+{
+	"folders": [
+		// {
+		// 	"path": "../insta-ui"
+		// },
+		{
+			"path": "."
+		},
+		{
+			"path": "../ump2-ui"
+		},
+		// {
+		// 	"path": "../paytmstores-consumer"
+		// },
+		// {
+		// 	"path": "../paytmstores-consumer-bff"
+		// }
+	]
+}
