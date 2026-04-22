@@ -44,6 +44,10 @@ export function registerJiraAttachmentsTools(mcpServer, config) {
     async ({ attachments, issueKey }) => {
       logger.toolCall('jira_get_attachments_content', { count: Array.isArray(attachments) ? attachments.length : 0 });
       const tk = normalizeIssueKey(issueKey);
+      if (tk) {
+        await pipelineTracker.ensure(tk);
+        await pipelineTracker.log(tk, 'Downloading Jira image attachments…');
+      }
 
       if (!jira) {
         return {

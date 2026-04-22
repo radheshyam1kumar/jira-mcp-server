@@ -130,17 +130,32 @@ export function registerBitbucketTools(mcpServer, bitbucketConfig) {
       inputSchema: {
         branchName: z.string().min(1).describe('New branch name to create'),
         baseBranch: z.string().min(1).describe('Existing branch to branch from (e.g. develop)'),
+        issueKey: z
+          .string()
+          .regex(TICKET_KEY_PATTERN)
+          .optional()
+          .describe('Optional Jira key for pipeline tracking (e.g. IPG-1096).'),
         ...optionalRepo,
       },
     },
     async (input) => {
       logger.toolCall('bitbucket_create_branch', { branchName: input.branchName, baseBranch: input.baseBranch });
+      const tk = resolvePipelineIssueKey(input.issueKey, input.branchName);
+      if (tk) {
+        await pipelineTracker.ensure(tk);
+        await pipelineTracker.log(tk, 'Creating Bitbucket branch…');
+      }
       const err = guard();
       if (err) return { content: [{ type: 'text', text: formatToolJson(err) }], isError: true };
       try {
         const out = await bb.createBranch(input.branchName, input.baseBranch, repoOverrideFromInput(input));
+        if (tk) await pipelineTracker.log(tk, 'Bitbucket branch created.');
         return { content: [{ type: 'text', text: formatToolJson(out) }] };
       } catch (e) {
+        if (tk) {
+          const msg = e instanceof Error ? e.message : String(e);
+          await pipelineTracker.log(tk, `Bitbucket branch create failed: ${msg}`);
+        }
         return handleBitbucketError(e, 'bitbucket_create_branch');
       }
     },
@@ -262,17 +277,32 @@ export function registerBitbucketTools(mcpServer, bitbucketConfig) {
       description: 'Fetches diff for a pull request id (GET .../pullrequests/{id}/diff). Returns JSON or text depending on API response.',
       inputSchema: {
         prId: z.number().int().positive().describe('Pull request numeric id'),
+        issueKey: z
+          .string()
+          .regex(TICKET_KEY_PATTERN)
+          .optional()
+          .describe('Optional Jira key for pipeline tracking (e.g. IPG-1096).'),
         ...optionalRepo,
       },
     },
     async (input) => {
       logger.toolCall('bitbucket_get_pr_diff', { prId: input.prId });
+      const tk = resolvePipelineIssueKey(input.issueKey);
+      if (tk) {
+        await pipelineTracker.ensure(tk);
+        await pipelineTracker.log(tk, 'Fetching Bitbucket pull request diff…');
+      }
       const err = guard();
       if (err) return { content: [{ type: 'text', text: formatToolJson(err) }], isError: true };
       try {
         const out = await bb.getPRDiff(input.prId, repoOverrideFromInput(input));
+        if (tk) await pipelineTracker.log(tk, 'Fetched Bitbucket pull request diff.');
         return { content: [{ type: 'text', text: formatToolJson(out) }] };
       } catch (e) {
+        if (tk) {
+          const msg = e instanceof Error ? e.message : String(e);
+          await pipelineTracker.log(tk, `Fetch PR diff failed: ${msg}`);
+        }
         return handleBitbucketError(e, 'bitbucket_get_pr_diff');
       }
     },
@@ -286,17 +316,32 @@ export function registerBitbucketTools(mcpServer, bitbucketConfig) {
       inputSchema: {
         prId: z.number().int().positive().describe('Pull request numeric id'),
         message: z.string().min(1).describe('Comment body (plain / markdown per repo settings)'),
+        issueKey: z
+          .string()
+          .regex(TICKET_KEY_PATTERN)
+          .optional()
+          .describe('Optional Jira key for pipeline tracking (e.g. IPG-1096).'),
         ...optionalRepo,
       },
     },
     async (input) => {
       logger.toolCall('bitbucket_comment_pull_request', { prId: input.prId });
+      const tk = resolvePipelineIssueKey(input.issueKey);
+      if (tk) {
+        await pipelineTracker.ensure(tk);
+        await pipelineTracker.log(tk, 'Posting Bitbucket pull request comment…');
+      }
       const err = guard();
       if (err) return { content: [{ type: 'text', text: formatToolJson(err) }], isError: true };
       try {
         const out = await bb.postPRComment(input.prId, input.message, repoOverrideFromInput(input));
+        if (tk) await pipelineTracker.log(tk, 'Bitbucket pull request comment posted.');
         return { content: [{ type: 'text', text: formatToolJson(out) }] };
       } catch (e) {
+        if (tk) {
+          const msg = e instanceof Error ? e.message : String(e);
+          await pipelineTracker.log(tk, `PR comment failed: ${msg}`);
+        }
         return handleBitbucketError(e, 'bitbucket_comment_pull_request');
       }
     },
@@ -364,17 +409,32 @@ export function registerBitbucketTools(mcpServer, bitbucketConfig) {
         'Declines an open PR without merging (POST .../pullrequests/{id}/decline). Use when the user wants to close or abandon a pull request.',
       inputSchema: {
         prId: z.number().int().positive().describe('Pull request numeric id'),
+        issueKey: z
+          .string()
+          .regex(TICKET_KEY_PATTERN)
+          .optional()
+          .describe('Optional Jira key for pipeline tracking (e.g. IPG-1096).'),
         ...optionalRepo,
       },
     },
     async (input) => {
       logger.toolCall('bitbucket_decline_pull_request', { prId: input.prId });
+      const tk = resolvePipelineIssueKey(input.issueKey);
+      if (tk) {
+        await pipelineTracker.ensure(tk);
+        await pipelineTracker.log(tk, 'Declining Bitbucket pull request…');
+      }
       const err = guard();
       if (err) return { content: [{ type: 'text', text: formatToolJson(err) }], isError: true };
       try {
         const out = await bb.declinePR(input.prId, repoOverrideFromInput(input));
+        if (tk) await pipelineTracker.log(tk, 'Bitbucket pull request declined.');
         return { content: [{ type: 'text', text: formatToolJson(out) }] };
       } catch (e) {
+        if (tk) {
+          const msg = e instanceof Error ? e.message : String(e);
+          await pipelineTracker.log(tk, `Decline PR failed: ${msg}`);
+        }
         return handleBitbucketError(e, 'bitbucket_decline_pull_request');
       }
     },
@@ -387,17 +447,32 @@ export function registerBitbucketTools(mcpServer, bitbucketConfig) {
       description: 'GET refs/branches/{name}; returns exists and tip hash when present.',
       inputSchema: {
         branchName: z.string().min(1).describe('Branch name to check'),
+        issueKey: z
+          .string()
+          .regex(TICKET_KEY_PATTERN)
+          .optional()
+          .describe('Optional Jira key for pipeline tracking (e.g. IPG-1096).'),
         ...optionalRepo,
       },
     },
     async (input) => {
       logger.toolCall('bitbucket_check_branch_exists', { branchName: input.branchName });
+      const tk = resolvePipelineIssueKey(input.issueKey, input.branchName);
+      if (tk) {
+        await pipelineTracker.ensure(tk);
+        await pipelineTracker.log(tk, 'Checking Bitbucket branch existence…');
+      }
       const err = guard();
       if (err) return { content: [{ type: 'text', text: formatToolJson(err) }], isError: true };
       try {
         const out = await bb.checkBranchExists(input.branchName, repoOverrideFromInput(input));
+        if (tk) await pipelineTracker.log(tk, 'Checked Bitbucket branch existence.');
         return { content: [{ type: 'text', text: formatToolJson(out) }] };
       } catch (e) {
+        if (tk) {
+          const msg = e instanceof Error ? e.message : String(e);
+          await pipelineTracker.log(tk, `Check branch failed: ${msg}`);
+        }
         return handleBitbucketError(e, 'bitbucket_check_branch_exists');
       }
     },
@@ -416,11 +491,21 @@ export function registerBitbucketTools(mcpServer, bitbucketConfig) {
           .enum(['OPEN', 'MERGED', 'DECLINED', 'SUPERSEDED'])
           .optional()
           .describe('PR state filter (default OPEN)'),
+        issueKey: z
+          .string()
+          .regex(TICKET_KEY_PATTERN)
+          .optional()
+          .describe('Optional Jira key for pipeline tracking (e.g. IPG-1096).'),
         ...optionalRepo,
       },
     },
     async (input) => {
       logger.toolCall('bitbucket_check_pr_exists', { sourceBranch: input.sourceBranch });
+      const tk = resolvePipelineIssueKey(input.issueKey, input.sourceBranch);
+      if (tk) {
+        await pipelineTracker.ensure(tk);
+        await pipelineTracker.log(tk, 'Checking Bitbucket pull request existence…');
+      }
       const err = guard();
       if (err) return { content: [{ type: 'text', text: formatToolJson(err) }], isError: true };
       try {
@@ -432,8 +517,13 @@ export function registerBitbucketTools(mcpServer, bitbucketConfig) {
           },
           repoOverrideFromInput(input),
         );
+        if (tk) await pipelineTracker.log(tk, 'Checked Bitbucket pull request existence.');
         return { content: [{ type: 'text', text: formatToolJson(out) }] };
       } catch (e) {
+        if (tk) {
+          const msg = e instanceof Error ? e.message : String(e);
+          await pipelineTracker.log(tk, `Check PR failed: ${msg}`);
+        }
         return handleBitbucketError(e, 'bitbucket_check_pr_exists');
       }
     },

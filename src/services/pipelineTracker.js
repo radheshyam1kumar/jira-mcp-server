@@ -58,6 +58,9 @@ export const pipelineTracker = {
       descriptionPreview: fields?.descriptionPreview,
     });
   },
+  beginNewDevelopmentCycle(issueKey) {
+    return sendEvent({ type: 'BEGIN_NEW_DEV_CYCLE', issueKey });
+  },
   jiraFetchFailed(issueKey, message, description) {
     return sendEvent({
       type: 'JIRA_FETCH_FAILED',

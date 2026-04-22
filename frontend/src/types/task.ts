@@ -13,6 +13,7 @@ export interface Task {
   currentStatusDescription?: string
   repository?: string
   prUrl?: string
+  prUrls?: string[]
   stages?: PipelineStageRow[]
   jiraStatus?: string
   activityLogs?: string[]

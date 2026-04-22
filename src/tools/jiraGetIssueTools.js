@@ -24,16 +24,22 @@ export function registerJiraGetIssueTools(mcpServer, config) {
     {
       title: 'Get Jira issue',
       description:
-        'Fetches a Jira Cloud issue by key (e.g. IPG-754) and returns issueKey, summary, description, status, assignee, and attachments metadata (fileName, mimeType, url). Use jira_get_attachments_content to download images as base64.',
+        'Fetches a Jira Cloud issue by key (e.g. IPG-754) and returns issueKey, summary, description, status, assignee, and attachments metadata (fileName, mimeType, url). Use jira_get_attachments_content to download images as base64. When the user starts a new "develop" pass on an already-completed pipeline, set beginNewDevelopmentCycle: true so the dashboard resets stages to Development (PR URL history and activity logs are preserved).',
       inputSchema: {
         issueKey: z
           .string()
           .min(1)
           .describe('Jira issue key, e.g. IPG-754'),
+        beginNewDevelopmentCycle: z
+          .boolean()
+          .optional()
+          .describe(
+            'If true, reset pipeline stages to start at Development after fetch (keeps prUrls and activityLogs). Use when user explicitly begins development again (e.g. "develop IPG-1096") on a ticket that already reached PR/build/deploy.',
+          ),
       },
     },
-    async ({ issueKey }) => {
-      logger.toolCall('jira_get_issue', { issueKey });
+    async ({ issueKey, beginNewDevelopmentCycle }) => {
+      logger.toolCall('jira_get_issue', { issueKey, beginNewDevelopmentCycle: Boolean(beginNewDevelopmentCycle) });
       const pipelineKey = normalizeIssueKey(issueKey);
       if (pipelineKey) {
         await pipelineTracker.ensure(pipelineKey);
@@ -89,6 +95,9 @@ export function registerJiraGetIssueTools(mcpServer, config) {
         };
 
         if (pipelineKey) {
+          if (beginNewDevelopmentCycle) {
+            await pipelineTracker.beginNewDevelopmentCycle(pipelineKey);
+          }
           const desc = issue.description != null ? String(issue.description) : '';
           await pipelineTracker.jiraFetched(pipelineKey, {
             summary: issue.summary,

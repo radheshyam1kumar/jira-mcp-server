@@ -101,7 +101,7 @@ export function DashboardScreen() {
     void pull()
     const timer = window.setInterval(() => {
       void pull()
-    }, 10_000)
+    }, 5_000)
 
     return () => {
       cancelled = true
