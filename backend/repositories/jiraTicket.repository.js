@@ -35,15 +35,26 @@ function computeProgress(stages) {
   return Math.min(100, Math.round((success / stages.length) * 100));
 }
 
+function allStagesSucceeded(stages) {
+  return Array.isArray(stages) && stages.length > 0 && stages.every((s) => s.status === 'SUCCESS');
+}
+
 export function serializeJiraTicket(data, id) {
   if (!data) return null;
   const { createdAt, updatedAt, ...rest } = data;
   const stages = Array.isArray(data.stages) ? data.stages : initialStages();
+  const prUrls = Array.isArray(data.prUrls)
+    ? data.prUrls.map((x) => String(x || '').trim()).filter(Boolean)
+    : data.prUrl
+      ? [String(data.prUrl).trim()]
+      : [];
   return {
     _id: id,
     ...rest,
     issueKey: id,
     stages,
+    prUrls,
+    prUrl: prUrls[0] || '',
     progress: typeof data.progress === 'number' ? data.progress : computeProgress(stages),
     ...(createdAt !== undefined ? { createdAt: timestampToIso(createdAt) } : {}),
     ...(updatedAt !== undefined ? { updatedAt: timestampToIso(updatedAt) } : {}),
@@ -51,8 +62,18 @@ export function serializeJiraTicket(data, id) {
 }
 
 function mergeStageStatuses(existingStages, stageId, status) {
+  const restartFromDevelopment =
+    stageId === 'DEVELOPMENT' &&
+    status === 'IN_PROGRESS' &&
+    Array.isArray(existingStages) &&
+    existingStages.length === PIPELINE_STAGE_IDS.length &&
+    existingStages
+      .slice(PIPELINE_STAGE_IDS.indexOf('DEVELOPMENT') + 1)
+      .some((s) => s && typeof s === 'object' && s.status !== 'PENDING');
   const base =
-    Array.isArray(existingStages) && existingStages.length === PIPELINE_STAGE_IDS.length
+    restartFromDevelopment
+      ? initialStages()
+      : Array.isArray(existingStages) && existingStages.length === PIPELINE_STAGE_IDS.length
       ? existingStages.map((s) => ({ ...s }))
       : initialStages();
   const idx = PIPELINE_STAGE_IDS.indexOf(stageId);
@@ -68,12 +89,31 @@ function mergeStageStatuses(existingStages, stageId, status) {
     for (let i = 0; i < idx; i += 1) {
       if (next[i].status === 'PENDING') next[i] = { ...next[i], status: 'SUCCESS' };
     }
+    // Current stage is active again — anything after it must not stay "done" from an old run.
+    for (let i = idx + 1; i < next.length; i += 1) {
+      next[i] = { ...next[i], status: 'PENDING' };
+    }
   }
   if (status === 'FAILED') {
     for (let i = idx + 1; i < next.length; i += 1) {
-      if (next[i].status === 'IN_PROGRESS') next[i] = { ...next[i], status: 'PENDING' };
+      next[i] = { ...next[i], status: 'PENDING' };
     }
   }
+  return { stages: next, changed: true };
+}
+
+function stagesForRetry(existingStages) {
+  const base =
+    Array.isArray(existingStages) && existingStages.length === PIPELINE_STAGE_IDS.length
+      ? existingStages.map((s) => ({ ...s }))
+      : initialStages();
+  const failedIdx = base.findIndex((s) => s.status === 'FAILED');
+  if (failedIdx === -1) return { stages: base, changed: false };
+  const next = base.map((s, idx) => {
+    if (idx < failedIdx) return s;
+    if (idx === failedIdx) return { ...s, status: 'IN_PROGRESS' };
+    return { ...s, status: 'PENDING' };
+  });
   return { stages: next, changed: true };
 }
 
@@ -107,6 +147,7 @@ export async function ensureTicketDocument(issueKey, userId = DEFAULT_USER_DOC_I
       descriptionPreview: '',
       repository: '',
       prUrl: '',
+      prUrls: [],
       activityLogs: [],
       stages: initialStages(),
       currentStatus: 'RUNNING',
@@ -163,6 +204,58 @@ export async function patchTicket(issueKey, patch) {
   return serializeJiraTicket(next.data(), ref.id);
 }
 
+/**
+ * Start a new development cycle on an existing ticket: stages reset so work is "at Development"
+ * again (fetch + analyze marked done for this cycle). Preserves prUrls, prUrl, activityLogs,
+ * repository, and other metadata — only stages + progress + running status are updated.
+ */
+export async function resetStagesForNewDevelopmentCycle(issueKey) {
+  const key = normalizeIssueKey(issueKey);
+  if (!key) return null;
+  const ref = db.collection(COLLECTION).doc(key);
+  const snap = await ref.get();
+  if (!snap.exists) return null;
+  const stages = PIPELINE_STAGE_DEFS.map((def, i) => ({
+    id: def.id,
+    label: def.label,
+    status: i <= 1 ? 'SUCCESS' : i === 2 ? 'IN_PROGRESS' : 'PENDING',
+  }));
+  const progress = computeProgress(stages);
+  await ref.update({
+    stages,
+    progress,
+    currentStatus: 'RUNNING',
+    currentStatusDescription: '',
+    updatedAt: FieldValue.serverTimestamp(),
+  });
+  const out = await ref.get();
+  return serializeJiraTicket(out.data(), out.id);
+}
+
+export async function addPrUrl(issueKey, prUrl) {
+  const key = normalizeIssueKey(issueKey);
+  if (!key) return null;
+  const value = String(prUrl || '').trim().slice(0, 2000);
+  if (!value) return getTicketByIssueKey(key);
+  const ref = db.collection(COLLECTION).doc(key);
+  const snap = await ref.get();
+  if (!snap.exists) return null;
+  const data = snap.data() || {};
+  const existing = Array.isArray(data.prUrls)
+    ? data.prUrls.map((x) => String(x || '').trim()).filter(Boolean)
+    : data.prUrl
+      ? [String(data.prUrl).trim()]
+      : [];
+  const nextUrls = [value, ...existing.filter((u) => u !== value)];
+  await ref.update({
+    prUrl: value,
+    prUrls: nextUrls,
+    updatedAt: FieldValue.serverTimestamp(),
+  });
+  const out = await ref.get();
+  return serializeJiraTicket(out.data(), out.id);
+}
+
 export async function applyStageUpdate(issueKey, stageId, stageStatus, options = {}) {
   const key = normalizeIssueKey(issueKey);
   if (!key) return null;
@@ -171,13 +264,33 @@ export async function applyStageUpdate(issueKey, stageId, stageStatus, options =
   if (!snap.exists) return null;
   const data = snap.data();
   const { stages, changed } = mergeStageStatuses(data.stages, stageId, stageStatus);
-  if (!changed) return serializeJiraTicket(data, key);
+  if (!changed) {
+    if (stageStatus === 'SUCCESS' && allStagesSucceeded(stages) && data.currentStatus !== 'CLOSED') {
+      await ref.update({
+        currentStatus: 'CLOSED',
+        currentStatusDescription: String(options.description || 'Pipeline completed successfully.').slice(0, 2000),
+        progress: 100,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+      const closed = await ref.get();
+      return serializeJiraTicket(closed.data(), closed.id);
+    }
+    return serializeJiraTicket(data, key);
+  }
   const progress = computeProgress(stages);
   const updates = {
     stages,
     progress,
     updatedAt: FieldValue.serverTimestamp(),
   };
+  if (stageStatus === 'IN_PROGRESS') {
+    updates.currentStatus = 'RUNNING';
+    updates.currentStatusDescription = '';
+  }
+  if (stageStatus === 'SUCCESS' && allStagesSucceeded(stages)) {
+    updates.currentStatus = 'CLOSED';
+    updates.currentStatusDescription = String(options.description || 'Pipeline completed successfully.').slice(0, 2000);
+  }
   if (stageStatus === 'FAILED') {
     updates.currentStatus = 'FAILED';
     if (options.description) {
@@ -221,11 +334,15 @@ export async function markBuildClosed(issueKey) {
   const stages = Array.isArray(data.stages) ? [...data.stages] : initialStages();
   const buildIdx = PIPELINE_STAGE_IDS.indexOf('BUILD');
   const next = stages.map((s, i) => (i <= buildIdx ? { ...s, status: 'SUCCESS' } : { ...s }));
+  const progress = computeProgress(next);
+  const closed = allStagesSucceeded(next);
   await ref.update({
-    currentStatus: 'CLOSED',
-    currentStatusDescription: 'Build completed successfully.',
+    currentStatus: closed ? 'CLOSED' : 'RUNNING',
+    currentStatusDescription: closed
+      ? 'Pipeline completed successfully.'
+      : 'Build completed successfully. Awaiting deployment.',
     stages: next,
-    progress: 100,
+    progress,
     updatedAt: FieldValue.serverTimestamp(),
   });
   const out = await ref.get();
@@ -233,7 +350,9 @@ export async function markBuildClosed(issueKey) {
 }
 
 export async function markDeployStageSuccess(issueKey) {
-  return applyStageUpdate(issueKey, 'DEPLOY', 'SUCCESS');
+  return applyStageUpdate(issueKey, 'DEPLOY', 'SUCCESS', {
+    description: 'Deployment completed successfully.',
+  });
 }
 
 export async function resetTicketForRetry(issueKey) {
@@ -242,12 +361,14 @@ export async function resetTicketForRetry(issueKey) {
   const ref = db.collection(COLLECTION).doc(key);
   const snap = await ref.get();
   if (!snap.exists) return null;
+  const current = snap.data() || {};
+  const { stages, changed } = stagesForRetry(current.stages);
+  const progress = computeProgress(stages);
   await ref.update({
     currentStatus: 'RUNNING',
-    currentStatusDescription: '',
-    stages: initialStages(),
-    progress: 0,
-    prUrl: '',
+    currentStatusDescription: changed ? 'Retry requested. Resuming pipeline from failed stage.' : '',
+    stages,
+    progress,
     updatedAt: FieldValue.serverTimestamp(),
   });
   const out = await ref.get();

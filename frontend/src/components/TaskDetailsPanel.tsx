@@ -34,7 +34,14 @@ function TaskDetailsBody({ task }: { task: Task }) {
   const refreshTasks = useTaskDashboardStore((s) => s.refreshTasks)
 
   const repo = repoSlugFromTask(task)
-  const prUrl = task.prUrl?.trim() ? task.prUrl.trim() : null
+  const prUrls = Array.from(
+    new Set(
+      [task.prUrl, ...(Array.isArray(task.prUrls) ? task.prUrls : [])]
+        .map((u) => String(u || '').trim())
+        .filter(Boolean),
+    ),
+  )
+  const latestPrUrl = prUrls[0] ?? null
 
   const stageRows =
     task.stages && task.stages.length > 0
@@ -53,12 +60,17 @@ function TaskDetailsBody({ task }: { task: Task }) {
       if (failedIdx >= 0) return Math.min(n, failedIdx + 1)
       return Math.min(n, Math.max(1, Math.ceil((task.progress / 100) * n)))
     }
-    const inProg = stageRows.findIndex((s) => s.status === 'IN_PROGRESS')
-    if (inProg >= 0) return inProg + 1
-    const firstPending = stageRows.findIndex((s) => s.status === 'PENDING')
-    if (firstPending >= 0) return Math.min(n, firstPending + 1)
-    return Math.min(n, Math.max(1, Math.ceil((task.progress / 100) * n)))
+    const firstIncomplete = stageRows.findIndex(
+      (s) => s.status === 'PENDING' || s.status === 'IN_PROGRESS' || s.status === 'FAILED',
+    )
+    if (firstIncomplete === -1) return n
+    return firstIncomplete + 1
   })()
+
+  const firstIncompleteIdx = stageRows.findIndex(
+    (s) => s.status === 'PENDING' || s.status === 'IN_PROGRESS' || s.status === 'FAILED',
+  )
+  const frontier = firstIncompleteIdx === -1 ? stageRows.length : firstIncompleteIdx
 
   return (
     <section className="flex min-h-0 flex-1 flex-col gap-4 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -96,13 +108,12 @@ function TaskDetailsBody({ task }: { task: Task }) {
           <p className="text-xs font-semibold uppercase tracking-wide text-[#002E7E]">Current stage</p>
           <ol className="mt-3 grid gap-2 sm:grid-cols-2">
             {stageRows.map((row, idx) => {
+              const failed = row.status === 'FAILED'
               const done =
-                row.status === 'SUCCESS' ||
-                row.status === 'FAILED' ||
+                failed ||
                 task.pipelineStatus === 'CLOSED' ||
                 task.status === 'completed' ||
-                idx < stepIndex - 1
-              const failed = row.status === 'FAILED'
+                (row.status === 'SUCCESS' && idx < frontier)
               const current =
                 task.status !== 'completed' &&
                 task.pipelineStatus !== 'CLOSED' &&
@@ -140,17 +151,29 @@ function TaskDetailsBody({ task }: { task: Task }) {
 
         <div className="rounded-xl border border-slate-200 bg-[#F5F7F9] p-4">
           <p className="text-xs font-semibold uppercase tracking-wide text-[#002E7E]">Pull request</p>
-          {prUrl ? (
+          {prUrls.length > 0 ? (
             <>
-              <a  href={prUrl} target="_blank" rel="noreferrer" className="mt-2 break-all font-mono text-xs font-medium text-[#00BAF2]">{prUrl}</a >
+              <div className="mt-2 space-y-2">
+                {prUrls.map((url) => (
+                  <a
+                    key={url}
+                    href={url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="block break-all font-mono text-xs font-medium text-[#00BAF2]"
+                  >
+                    {url}
+                  </a>
+                ))}
+              </div>
               <div className="mt-3 flex flex-wrap gap-2">
                 <a
                   className="inline-flex items-center justify-center rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-[#002E7E] shadow-sm hover:bg-slate-50"
-                  href={prUrl}
+                  href={latestPrUrl || undefined}
                   target="_blank"
                   rel="noreferrer"
                 >
-                  View PR
+                  View Latest PR
                 </a>
                 <button
                   type="button"
@@ -172,15 +195,15 @@ function TaskDetailsBody({ task }: { task: Task }) {
                   type="button"
                   className="rounded-lg bg-[#00BAF2] px-3 py-2 text-xs font-semibold text-white shadow-sm hover:bg-[#00a8d9]"
                   onClick={() => {
-                    void navigator.clipboard.writeText(prUrl)
+                    if (latestPrUrl) void navigator.clipboard.writeText(latestPrUrl)
                   }}
                 >
-                  Copy link
+                  Copy latest link
                 </button>
               </div>
             </>
           ) : (
-            <p className="mt-2 text-sm text-slate-500">PR link appears when the job completes.</p>
+            <p className="mt-2 text-sm text-slate-500">PR links appear when the job completes.</p>
           )}
         </div>
 
@@ -190,7 +213,7 @@ function TaskDetailsBody({ task }: { task: Task }) {
             <span className="font-semibold text-[#002E7E]">
               {task.pipelineStatus === 'CLOSED' || task.status === 'completed'
                 ? task.pipelineStatus === 'CLOSED'
-                  ? 'Build complete (closed)'
+                  ? 'Deployed (closed)'
                   : 'Deployed'
                 : task.status === 'failed'
                   ? 'Failed'

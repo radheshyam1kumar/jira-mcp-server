@@ -30,6 +30,13 @@ function mapTicketToTask(t: JiraTicketDto): Task {
     CLOSED: 'completed',
   }
   const id = t.issueKey || t._id
+  const prUrls = Array.from(
+    new Set(
+      [t.prUrl, ...(Array.isArray(t.prUrls) ? t.prUrls : [])]
+        .map((x) => String(x || '').trim())
+        .filter(Boolean),
+    ),
+  )
   return {
     id,
     name: (t.summary && t.summary.trim()) || id,
@@ -39,7 +46,8 @@ function mapTicketToTask(t: JiraTicketDto): Task {
     updatedAt: t.updatedAt,
     currentStatusDescription: t.currentStatusDescription,
     repository: t.repository,
-    prUrl: t.prUrl || undefined,
+    prUrl: prUrls[0] || undefined,
+    prUrls: prUrls.length > 0 ? prUrls : undefined,
     stages: t.stages,
     jiraStatus: t.jiraStatus,
     activityLogs: Array.isArray(t.activityLogs) ? t.activityLogs.map(formatLogLine) : undefined,

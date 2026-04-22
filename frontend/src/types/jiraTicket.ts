@@ -22,6 +22,7 @@ export interface JiraTicketDto {
   descriptionPreview?: string
   repository?: string
   prUrl?: string
+  prUrls?: string[]
   activityLogs?: JiraActivityLogLine[]
   activityLogCount?: number
   stages?: PipelineStageRow[]

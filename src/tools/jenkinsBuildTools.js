@@ -83,18 +83,22 @@ export function registerJenkinsBuildTools(mcpServer) {
     },
     async (input) => {
       logger.toolCall('jenkins_prepare_build', { repoKey: input.repoKey, jiraId: input.jiraId });
+      const tk = resolvePipelineIssueKey(input);
+      if (tk) {
+        await pipelineTracker.ensure(tk);
+        await pipelineTracker.log(tk, 'Preparing Jenkins build parameters…');
+      }
       try {
         const merged = mergeJenkinsBuildParams(input.repoKey, {
           params: input.params,
           extraParams: input.extraParams,
         });
-        const tk = resolvePipelineIssueKey(input);
-        if (tk) await pipelineTracker.log(tk, 'Preparing Jenkins build parameters…');
         const buildArtifactSample = getBuildSampleArtifactReference(input.repoKey);
         const confirmationPrompt = formatBuildConfirmationPrompt(input.jiraId, merged, {
           buildArtifactSample: buildArtifactSample || undefined,
         });
         const mergedPayload = toBuildParams(merged);
+        if (tk) await pipelineTracker.log(tk, 'Jenkins build parameters prepared.');
         return {
           content: [
             {
@@ -111,6 +115,10 @@ export function registerJenkinsBuildTools(mcpServer) {
           ],
         };
       } catch (err) {
+        if (tk) {
+          const msg = err instanceof Error ? err.message : String(err);
+          await pipelineTracker.log(tk, `Prepare Jenkins build failed: ${msg}`);
+        }
         if (err instanceof RepoConfigError) {
           logger.error('jenkins_prepare_build.config_error', { code: err.code, message: err.message });
           return {
@@ -257,18 +265,33 @@ export function registerJenkinsBuildTools(mcpServer) {
           .optional()
           .describe('reposConfig key — required for Jenkins URL/credentials from reposConfig[repoKey].build'),
         jobPath: buildParamOverrides.jobPath,
+        issueKey: z
+          .string()
+          .optional()
+          .describe('Optional Jira key for pipeline activity logs (e.g. IPG-1096).'),
+        jiraId: z
+          .string()
+          .optional()
+          .describe('Optional Jira key alias (same purpose as issueKey).'),
       },
     },
     async (input) => {
       logger.toolCall('jenkins_get_build_console', { buildNumber: input.buildNumber, repoKey: input.repoKey });
+      const tk = resolvePipelineIssueKey(input);
+      if (tk) {
+        await pipelineTracker.ensure(tk);
+        await pipelineTracker.log(tk, `Fetching Jenkins build console for #${input.buildNumber}…`);
+      }
       const conn = resolveJenkinsBuildConnection(input.repoKey);
       if (!conn) {
+        if (tk) await pipelineTracker.log(tk, 'Jenkins build console fetch failed: Jenkins build is not configured.');
         return { content: [{ type: 'text', text: formatToolJson(notConfiguredPayload()) }], isError: true };
       }
       try {
         const pipeline = createPipeline(conn, input.jobPath);
         const log = await pipeline.getConsoleLog(input.buildNumber);
         const s3Path = pipeline.extractS3Path(log);
+        if (tk) await pipelineTracker.log(tk, `Fetched Jenkins build console for #${input.buildNumber}.`);
         return {
           content: [
             {
@@ -286,6 +309,7 @@ export function registerJenkinsBuildTools(mcpServer) {
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         logger.error('jenkins_get_build_console.failed', { message });
+        if (tk) await pipelineTracker.log(tk, `Jenkins build console fetch failed: ${message}`);
         return {
           content: [{ type: 'text', text: formatToolJson({ error: true, message }) }],
           isError: true,

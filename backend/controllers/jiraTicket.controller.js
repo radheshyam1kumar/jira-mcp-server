@@ -1,6 +1,13 @@
 import { DEFAULT_USER_DOC_ID } from '../constants/pipelineStages.js';
 import * as repo from '../repositories/jiraTicket.repository.js';
 
+/** Fully green pipeline or terminal ticket — a fresh Jira fetch implies a new cycle. */
+function shouldResetPipelineForStaleCompletion(existing) {
+  if (!existing || !Array.isArray(existing.stages) || existing.stages.length === 0) return false;
+  const allSuccess = existing.stages.every((s) => s && s.status === 'SUCCESS');
+  return allSuccess || existing.currentStatus === 'CLOSED';
+}
+
 function toListShape(t) {
   if (!t) return t;
   const { activityLogs, ...rest } = t;
@@ -50,7 +57,7 @@ export async function retryJiraTicket(req, res, next) {
       res.status(404).json({ message: 'Ticket not found.' });
       return;
     }
-    await repo.appendActivityLog(key, 'Pipeline retry requested — stages reset.');
+    await repo.appendActivityLog(key, 'Pipeline retry requested — resuming from failed stage.');
     const out = await repo.getTicketByIssueKey(key);
     res.json(out);
   } catch (err) {
@@ -102,8 +109,25 @@ export async function postPipelineEvent(req, res, next) {
           description: body.description,
         });
         break;
+      case 'BEGIN_NEW_DEV_CYCLE': {
+        await repo.ensureTicketDocument(key);
+        await repo.appendActivityLog(
+          key,
+          'New development cycle — pipeline reset to Development (PR history and logs preserved).',
+        );
+        out = await repo.resetStagesForNewDevelopmentCycle(key);
+        break;
+      }
       case 'JIRA_FETCHED': {
         await repo.ensureTicketDocument(key);
+        const snapshot = await repo.getTicketByIssueKey(key);
+        if (snapshot && shouldResetPipelineForStaleCompletion(snapshot)) {
+          await repo.appendActivityLog(
+            key,
+            'Jira refreshed while pipeline was fully complete — resetting stages for a new cycle (PR history and logs preserved).',
+          );
+          await repo.resetStagesForNewDevelopmentCycle(key);
+        }
         await repo.appendActivityLog(key, 'Jira ticket metadata loaded.');
         await repo.setJiraIssueFields(key, {
           summary: body.summary,
@@ -126,7 +150,7 @@ export async function postPipelineEvent(req, res, next) {
       }
       case 'SET_PR':
         await repo.ensureTicketDocument(key);
-        await repo.patchTicket(key, { prUrl: String(body.prUrl || '').slice(0, 2000) });
+        await repo.addPrUrl(key, body.prUrl);
         out = await repo.applyStageUpdate(key, 'RAISE_PR', 'SUCCESS');
         break;
       case 'SET_REPOSITORY':
