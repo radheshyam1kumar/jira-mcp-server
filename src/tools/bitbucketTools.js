@@ -257,7 +257,7 @@ export function registerBitbucketTools(mcpServer, bitbucketConfig) {
           const url = prUrlFromCreateOut(out, bbCfg);
           if (url) await pipelineTracker.setPrUrl(tk, url);
           else await pipelineTracker.stage(tk, 'RAISE_PR', 'SUCCESS');
-          await pipelineTracker.log(tk, 'Pull request created.');
+          await pipelineTracker.log(tk, `Pull request created: ${url}`);
         }
         return { content: [{ type: 'text', text: formatToolJson(out) }] };
       } catch (e) {
