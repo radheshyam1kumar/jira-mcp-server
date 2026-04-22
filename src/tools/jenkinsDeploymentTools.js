@@ -1,6 +1,8 @@
 import * as z from 'zod/v4';
 import { JenkinsDeploymentPipeline } from '../services/jenkinsDeploymentPipeline.js';
+import { pipelineTracker } from '../services/pipelineTracker.js';
 import { logger } from '../utils/logger.js';
+import { normalizeIssueKey } from '../utils/issueKey.js';
 import {
   RepoConfigError,
   formatDeployConfirmationPrompt,
@@ -24,9 +26,12 @@ function notConfiguredPayload() {
   };
 }
 
+function resolvePipelineIssueKey(input) {
+  return normalizeIssueKey(input?.issueKey || input?.jiraId);
+}
+
 const jenkinsParamRecord = z.record(z.string(), z.union([z.string(), z.number(), z.boolean()]));
 
-/** Jenkins job parameters: merge from reposConfig deploy.params + non-reserved deploy; tool params/extraParams override. */
 const deployParamOverrides = {
   params: jenkinsParamRecord
     .optional()
@@ -62,6 +67,14 @@ const deployParamOverrides = {
     .string()
     .optional()
     .describe('Override deployment job path for this run (default from reposConfig[repoKey].deploy.jobPath)'),
+  issueKey: z
+    .string()
+    .optional()
+    .describe('Jira key for pipeline dashboard (e.g. IPG-1096).'),
+  jiraId: z
+    .string()
+    .optional()
+    .describe('Optional Jira key alias (same purpose as issueKey), e.g. IPG-1096.'),
 };
 
 export function registerJenkinsDeploymentTools(mcpServer) {
@@ -99,6 +112,8 @@ export function registerJenkinsDeploymentTools(mcpServer) {
           SAMPLE_FILE: input.SAMPLE_FILE,
           sampleS3UriParamName: input.sampleS3UriParamName,
         });
+        const tk = resolvePipelineIssueKey(input);
+        if (tk) await pipelineTracker.log(tk, 'Preparing Jenkins deployment parameters…');
         const deploySampleReference = getDeploySampleArtifactReference(input.repoKey);
         const fullS3UriParamName = getDeploySampleUriParamName(input.repoKey, {
           sampleS3UriParamName: input.sampleS3UriParamName,
@@ -166,25 +181,51 @@ export function registerJenkinsDeploymentTools(mcpServer) {
     },
     async (input) => {
       logger.toolCall('jenkins_run_deployment', { repoKey: input.repoKey, s3Path: input.s3Path });
-      const conn = resolveJenkinsDeploymentConnection(input.repoKey);
-      if (!conn) {
-        return { content: [{ type: 'text', text: formatToolJson(notConfiguredPayload()) }], isError: true };
+      const tk = resolvePipelineIssueKey(input);
+      if (!tk) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: formatToolJson({
+                error: true,
+                code: 'ISSUE_KEY_REQUIRED',
+                message:
+                  'issueKey (or jiraId) is required for deployment tracking. Pass Jira key like IPG-1096.',
+              }),
+            },
+          ],
+          isError: true,
+        };
       }
       let params;
       try {
         params = toDeployParams(resolveJenkinsDeployInput(input));
       } catch (err) {
+        const inputErrorMessage = err instanceof Error ? err.message : String(err);
+        await pipelineTracker.fail(tk, `Jenkins deployment input: ${inputErrorMessage}`);
         if (err instanceof RepoConfigError) {
           return {
             content: [{ type: 'text', text: formatToolJson(err.toPayload()) }],
             isError: true,
           };
         }
-        const message = err instanceof Error ? err.message : String(err);
         return {
-          content: [{ type: 'text', text: formatToolJson({ error: true, message }) }],
+          content: [{ type: 'text', text: formatToolJson({ error: true, message: inputErrorMessage }) }],
           isError: true,
         };
+      }
+      if (tk) await pipelineTracker.ensure(tk);
+      const conn = resolveJenkinsDeploymentConnection(input.repoKey);
+      if (!conn) {
+        if (tk) {
+          await pipelineTracker.fail(tk, 'Jenkins deployment is not configured.');
+        }
+        return { content: [{ type: 'text', text: formatToolJson(notConfiguredPayload()) }], isError: true };
+      }
+      if (tk) {
+        await pipelineTracker.log(tk, 'Running Jenkins deployment…');
+        await pipelineTracker.stage(tk, 'DEPLOY', 'IN_PROGRESS');
       }
       try {
         const pipeline = createPipeline(conn, input.jobPath);
@@ -192,6 +233,10 @@ export function registerJenkinsDeploymentTools(mcpServer) {
           waitForBuildTimeoutMs: input.waitForBuildTimeoutMs,
           waitForCompletionTimeoutMs: input.waitForCompletionTimeoutMs,
         });
+        if (tk) {
+          await pipelineTracker.deploySuccess(tk);
+          await pipelineTracker.log(tk, 'Jenkins deployment finished with SUCCESS.');
+        }
         return {
           content: [
             {
@@ -207,6 +252,9 @@ export function registerJenkinsDeploymentTools(mcpServer) {
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         logger.error('jenkins_run_deployment.failed', { message });
+        if (tk) {
+          await pipelineTracker.fail(tk, `Jenkins deployment: ${message}`);
+        }
         return {
           content: [{ type: 'text', text: formatToolJson({ error: true, message }) }],
           isError: true,

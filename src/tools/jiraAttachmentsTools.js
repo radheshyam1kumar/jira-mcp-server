@@ -1,6 +1,8 @@
 import * as z from 'zod/v4';
 import { createJiraService, JiraServiceError } from '../services/jiraService.js';
+import { pipelineTracker } from '../services/pipelineTracker.js';
 import { logger } from '../utils/logger.js';
+import { normalizeIssueKey } from '../utils/issueKey.js';
 
 function formatToolJson(payload) {
   return JSON.stringify(payload, null, 2);
@@ -33,10 +35,15 @@ export function registerJiraAttachmentsTools(mcpServer, config) {
         attachments: z
           .array(attachmentMetaSchema)
           .describe('Array of attachment objects with url, fileName/filename, and mimeType'),
+        issueKey: z
+          .string()
+          .optional()
+          .describe('Jira key for pipeline activity logs (e.g. IPG-1096).'),
       },
     },
-    async ({ attachments }) => {
+    async ({ attachments, issueKey }) => {
       logger.toolCall('jira_get_attachments_content', { count: Array.isArray(attachments) ? attachments.length : 0 });
+      const tk = normalizeIssueKey(issueKey);
 
       if (!jira) {
         return {
@@ -63,12 +70,16 @@ export function registerJiraAttachmentsTools(mcpServer, config) {
         }));
 
         const payload = await jira.fetchImageAttachmentsContent(normalized);
+        if (tk) {
+          await pipelineTracker.log(tk, 'Downloaded Jira image attachments for analysis.');
+        }
         return {
           content: [{ type: 'text', text: formatToolJson(payload) }],
         };
       } catch (err) {
         if (err instanceof JiraServiceError) {
           logger.error('jira_get_attachments_content.failed', { code: err.code, message: err.message });
+          if (tk) await pipelineTracker.log(tk, `Jira attachment download failed: ${err.message}`);
           return {
             content: [{ type: 'text', text: formatToolJson(err.toAiPayload()) }],
             isError: true,
@@ -76,6 +87,7 @@ export function registerJiraAttachmentsTools(mcpServer, config) {
         }
         const message = err instanceof Error ? err.message : String(err);
         logger.error('jira_get_attachments_content.unexpected', { message });
+        if (tk) await pipelineTracker.log(tk, `Jira attachment download failed: ${message}`);
         return {
           content: [
             {

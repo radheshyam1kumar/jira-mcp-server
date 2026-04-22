@@ -1,6 +1,8 @@
 import * as z from 'zod/v4';
 import { JenkinsBuildPipeline } from '../services/jenkinsBuildPipeline.js';
+import { pipelineTracker } from '../services/pipelineTracker.js';
 import { logger } from '../utils/logger.js';
+import { normalizeIssueKey } from '../utils/issueKey.js';
 import {
   RepoConfigError,
   formatBuildConfirmationPrompt,
@@ -21,6 +23,10 @@ function notConfiguredPayload() {
     message:
       'Jenkins build is not configured. Add baseUrl (or JENKINS_BUILD_BASE_URL), jobPath (or JENKINS_BUILD_JOB_PATH), username (or JENKINS_BUILD_USERNAME), and apiToken (or JENKINS_BUILD_API_TOKEN) inside reposConfig[repoKey].build (or reposConfig[repoKey].build.connection) in injected reposConfig.',
   };
+}
+
+function resolvePipelineIssueKey(input) {
+  return normalizeIssueKey(input?.issueKey || input?.jiraId);
 }
 
 /** Arbitrary Jenkins build parameter names and values — must match the job’s parameter definitions. */
@@ -68,6 +74,10 @@ export function registerJenkinsBuildTools(mcpServer) {
           .string()
           .optional()
           .describe('Optional Jira key for display only in confirmation text, e.g. IPG-1096'),
+        issueKey: z
+          .string()
+          .optional()
+          .describe('Optional Jira key for pipeline dashboard (same as jiraId if you pass one).'),
         ...buildParamOverrides,
       },
     },
@@ -78,6 +88,8 @@ export function registerJenkinsBuildTools(mcpServer) {
           params: input.params,
           extraParams: input.extraParams,
         });
+        const tk = resolvePipelineIssueKey(input);
+        if (tk) await pipelineTracker.log(tk, 'Preparing Jenkins build parameters…');
         const buildArtifactSample = getBuildSampleArtifactReference(input.repoKey);
         const confirmationPrompt = formatBuildConfirmationPrompt(input.jiraId, merged, {
           buildArtifactSample: buildArtifactSample || undefined,
@@ -124,6 +136,10 @@ export function registerJenkinsBuildTools(mcpServer) {
         'Triggers parameterized build, waits for SUCCESS, extracts s3://…/*.tgz. Prefer jenkins_prepare_build → user confirms in chat → then this tool with same mergedPayload shape (repoKey + params/extraParams as used in prepare). Jenkins URL/credentials from reposConfig[repoKey].build — repoKey is required. Long-running.',
       inputSchema: {
         repoKey: z.string().min(1).describe('reposConfig key — required'),
+        jiraId: z
+          .string()
+          .optional()
+          .describe('Optional Jira key alias (same purpose as issueKey), e.g. IPG-1096'),
         ...buildParamOverrides,
         waitForBuildTimeoutMs: z
           .number()
@@ -137,29 +153,59 @@ export function registerJenkinsBuildTools(mcpServer) {
           .positive()
           .optional()
           .describe('Millis to wait for job to finish (default 600000)'),
+        issueKey: z
+          .string()
+          .optional()
+          .describe('Jira key for pipeline dashboard. On successful build the ticket is marked CLOSED.'),
       },
     },
     async (input) => {
       logger.toolCall('jenkins_run_build', { repoKey: input.repoKey });
-      const conn = resolveJenkinsBuildConnection(input.repoKey);
-      if (!conn) {
-        return { content: [{ type: 'text', text: formatToolJson(notConfiguredPayload()) }], isError: true };
+      const tk = resolvePipelineIssueKey(input);
+      if (!tk) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: formatToolJson({
+                error: true,
+                code: 'ISSUE_KEY_REQUIRED',
+                message:
+                  'issueKey (or jiraId) is required for build tracking. Pass Jira key like IPG-1096.',
+              }),
+            },
+          ],
+          isError: true,
+        };
       }
       let params;
       try {
         params = toBuildParams(resolveJenkinsBuildInput(input));
       } catch (err) {
+        const inputErrorMessage = err instanceof Error ? err.message : String(err);
+        await pipelineTracker.fail(tk, `Jenkins build input: ${inputErrorMessage}`);
         if (err instanceof RepoConfigError) {
           return {
             content: [{ type: 'text', text: formatToolJson(err.toPayload()) }],
             isError: true,
           };
         }
-        const message = err instanceof Error ? err.message : String(err);
         return {
-          content: [{ type: 'text', text: formatToolJson({ error: true, message }) }],
+          content: [{ type: 'text', text: formatToolJson({ error: true, message: inputErrorMessage }) }],
           isError: true,
         };
+      }
+      if (tk) await pipelineTracker.ensure(tk);
+      const conn = resolveJenkinsBuildConnection(input.repoKey);
+      if (!conn) {
+        if (tk) {
+          await pipelineTracker.fail(tk, 'Jenkins build is not configured.');
+        }
+        return { content: [{ type: 'text', text: formatToolJson(notConfiguredPayload()) }], isError: true };
+      }
+      if (tk) {
+        await pipelineTracker.log(tk, 'Starting Jenkins build…');
+        await pipelineTracker.stage(tk, 'BUILD', 'IN_PROGRESS');
       }
       try {
         const pipeline = createPipeline(conn, input.jobPath);
@@ -167,6 +213,10 @@ export function registerJenkinsBuildTools(mcpServer) {
           waitForBuildTimeoutMs: input.waitForBuildTimeoutMs,
           waitForCompletionTimeoutMs: input.waitForCompletionTimeoutMs,
         });
+        if (tk) {
+          await pipelineTracker.log(tk, 'Jenkins build finished with SUCCESS.');
+          await pipelineTracker.buildSuccess(tk);
+        }
         return {
           content: [
             {
@@ -182,6 +232,9 @@ export function registerJenkinsBuildTools(mcpServer) {
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         logger.error('jenkins_run_build.failed', { message });
+        if (tk) {
+          await pipelineTracker.fail(tk, `Jenkins build: ${message}`);
+        }
         return {
           content: [{ type: 'text', text: formatToolJson({ error: true, message }) }],
           isError: true,

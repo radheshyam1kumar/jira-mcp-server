@@ -1,6 +1,8 @@
 import * as z from 'zod/v4';
 import { createJiraService, JiraServiceError } from '../services/jiraService.js';
+import { pipelineTracker } from '../services/pipelineTracker.js';
 import { logger } from '../utils/logger.js';
+import { normalizeIssueKey } from '../utils/issueKey.js';
 import { processUrl } from '../utils/processUrl.js';
 
 function formatToolJson(payload) {
@@ -32,8 +34,20 @@ export function registerJiraGetIssueTools(mcpServer, config) {
     },
     async ({ issueKey }) => {
       logger.toolCall('jira_get_issue', { issueKey });
+      const pipelineKey = normalizeIssueKey(issueKey);
+      if (pipelineKey) {
+        await pipelineTracker.ensure(pipelineKey);
+        await pipelineTracker.log(pipelineKey, 'Fetching Jira ticket…');
+      }
 
       if (!jira) {
+        if (pipelineKey) {
+          await pipelineTracker.jiraFetchFailed(
+            pipelineKey,
+            'Jira is not configured (missing JIRA_DOMAIN, JIRA_EMAIL, JIRA_API_TOKEN).',
+            'Jira is not configured for this MCP session.',
+          );
+        }
         return {
           content: [
             {
@@ -74,12 +88,24 @@ export function registerJiraGetIssueTools(mcpServer, config) {
           links,
         };
 
+        if (pipelineKey) {
+          const desc = issue.description != null ? String(issue.description) : '';
+          await pipelineTracker.jiraFetched(pipelineKey, {
+            summary: issue.summary,
+            jiraStatus: issue.status,
+            descriptionPreview: desc.slice(0, 1500),
+          });
+        }
+
         return {
           content: [{ type: 'text', text: formatToolJson(payload) }],
         };
       } catch (err) {
         if (err instanceof JiraServiceError) {
           logger.error('jira_get_issue.failed', { code: err.code, message: err.message });
+          if (pipelineKey) {
+            await pipelineTracker.jiraFetchFailed(pipelineKey, err.message, err.message);
+          }
           return {
             content: [{ type: 'text', text: formatToolJson(err.toAiPayload()) }],
             isError: true,
@@ -87,6 +113,9 @@ export function registerJiraGetIssueTools(mcpServer, config) {
         }
         const message = err instanceof Error ? err.message : String(err);
         logger.error('jira_get_issue.unexpected', { message });
+        if (pipelineKey) {
+          await pipelineTracker.jiraFetchFailed(pipelineKey, message, message);
+        }
         return {
           content: [
             {

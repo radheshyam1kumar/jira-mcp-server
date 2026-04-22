@@ -1,0 +1,218 @@
+import { PIPELINE_STEPS, statusLineFromTask } from '../lib/pipeline'
+import type { Task } from '../types/task'
+import { useTaskLogs } from '../hooks/useTaskLogs'
+import { useTaskDashboardStore } from '../hooks/useTaskDashboardStore'
+import { LogsViewer } from './LogsViewer'
+import { ProgressBar } from './ProgressBar'
+import { StatusBadge } from './StatusBadge'
+
+function repoSlugFromTask(task: Task): string {
+  const r = task.repository?.trim()
+  if (r) return r
+  const slug = task.name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/(^-|-$)/g, '')
+  return slug || 'app-repo'
+}
+
+export function TaskDetailsPanel({ task }: { task: Task | null }) {
+  if (!task) {
+    return (
+      <section className="flex min-h-[40vh] items-center justify-center rounded-xl border border-dashed border-slate-200 bg-white p-10 text-center text-sm text-slate-500 shadow-sm">
+        Select a job to inspect pipeline progress, logs, and deployment status.
+      </section>
+    )
+  }
+
+  return <TaskDetailsBody task={task} />
+}
+
+function TaskDetailsBody({ task }: { task: Task }) {
+  const { lines, loading, error } = useTaskLogs(task)
+  const retryTask = useTaskDashboardStore((s) => s.retryTask)
+  const refreshTasks = useTaskDashboardStore((s) => s.refreshTasks)
+
+  const repo = repoSlugFromTask(task)
+  const prUrl = task.prUrl?.trim() ? task.prUrl.trim() : null
+
+  const stageRows =
+    task.stages && task.stages.length > 0
+      ? task.stages
+      : PIPELINE_STEPS.map((label, i) => ({
+          id: `fallback-${i}`,
+          label,
+          status: 'PENDING' as const,
+        }))
+
+  const stepIndex = (() => {
+    const n = stageRows.length
+    if (task.status === 'completed' || task.pipelineStatus === 'CLOSED') return n
+    if (task.status === 'failed') {
+      const failedIdx = stageRows.findIndex((s) => s.status === 'FAILED')
+      if (failedIdx >= 0) return Math.min(n, failedIdx + 1)
+      return Math.min(n, Math.max(1, Math.ceil((task.progress / 100) * n)))
+    }
+    const inProg = stageRows.findIndex((s) => s.status === 'IN_PROGRESS')
+    if (inProg >= 0) return inProg + 1
+    const firstPending = stageRows.findIndex((s) => s.status === 'PENDING')
+    if (firstPending >= 0) return Math.min(n, firstPending + 1)
+    return Math.min(n, Math.max(1, Math.ceil((task.progress / 100) * n)))
+  })()
+
+  return (
+    <section className="flex min-h-0 flex-1 flex-col gap-4 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+      <header className="shrink-0 space-y-2 border-b border-slate-100 pb-4">
+        <h2 className="text-lg font-bold text-[#002E7E]">
+          Job details — <span className="font-mono font-semibold text-[#00BAF2]">{task.id}</span>
+        </h2>
+        <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm text-slate-700">
+          <p>
+            <span className="text-slate-500">Repo:</span>{' '}
+            <span className="font-mono font-medium text-slate-800">{repo}</span>
+          </p>
+          <p className="flex items-center gap-2">
+            <span className="text-slate-500">Status:</span>{' '}
+            <StatusBadge
+              status={task.status}
+              label={task.pipelineStatus === 'CLOSED' ? 'Closed' : undefined}
+            />
+          </p>
+          {task.jiraStatus ? (
+            <p>
+              <span className="text-slate-500">Jira workflow:</span>{' '}
+              <span className="font-medium text-slate-800">{task.jiraStatus}</span>
+            </p>
+          ) : null}
+          <p>
+            <span className="text-slate-500">Job ID:</span>{' '}
+            <span className="font-mono font-medium text-slate-800">{shortId(task.id)}</span>
+          </p>
+        </div>
+      </header>
+
+      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
+        <div className="rounded-xl border border-slate-200 bg-[#F5F7F9] p-4">
+          <p className="text-xs font-semibold uppercase tracking-wide text-[#002E7E]">Current stage</p>
+          <ol className="mt-3 grid gap-2 sm:grid-cols-2">
+            {stageRows.map((row, idx) => {
+              const done =
+                row.status === 'SUCCESS' ||
+                row.status === 'FAILED' ||
+                task.pipelineStatus === 'CLOSED' ||
+                task.status === 'completed' ||
+                idx < stepIndex - 1
+              const failed = row.status === 'FAILED'
+              const current =
+                task.status !== 'completed' &&
+                task.pipelineStatus !== 'CLOSED' &&
+                !failed &&
+                idx === stepIndex - 1
+              return (
+                <li key={row.id} className="flex items-center gap-2 text-sm text-slate-800">
+                  <span
+                    className={[
+                      'inline-flex h-5 w-5 items-center justify-center rounded-full border text-[11px]',
+                      failed
+                        ? 'border-rose-300 bg-rose-50 text-rose-700'
+                        : done
+                          ? 'border-emerald-300 bg-emerald-50 text-emerald-700'
+                          : current
+                            ? 'border-[#00BAF2] bg-sky-50 text-[#002E7E]'
+                            : 'border-slate-200 bg-white text-slate-400',
+                    ].join(' ')}
+                    aria-hidden
+                  >
+                    {failed ? '!' : done ? '✓' : ''}
+                  </span>
+                  <span className={done || current ? 'font-medium' : 'text-slate-500'}>{row.label}</span>
+                </li>
+              )
+            })}
+          </ol>
+          <div className="mt-4">
+            <ProgressBar value={task.progress} />
+            <p className="mt-2 text-sm text-slate-700">{statusLineFromTask(task)}</p>
+          </div>
+        </div>
+
+        <LogsViewer lines={lines} loading={loading} error={error} />
+
+        <div className="rounded-xl border border-slate-200 bg-[#F5F7F9] p-4">
+          <p className="text-xs font-semibold uppercase tracking-wide text-[#002E7E]">Pull request</p>
+          {prUrl ? (
+            <>
+              <a  href={prUrl} target="_blank" rel="noreferrer" className="mt-2 break-all font-mono text-xs font-medium text-[#00BAF2]">{prUrl}</a >
+              <div className="mt-3 flex flex-wrap gap-2">
+                <a
+                  className="inline-flex items-center justify-center rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-[#002E7E] shadow-sm hover:bg-slate-50"
+                  href={prUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  View PR
+                </a>
+                <button
+                  type="button"
+                  className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 shadow-sm hover:bg-slate-50"
+                  onClick={() => void refreshTasks()}
+                >
+                  Re-sync
+                </button>
+                <button
+                  type="button"
+                  className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white shadow-sm hover:bg-emerald-500"
+                  onClick={() => {
+                    alert('Deploy Now will trigger your deployment pipeline (mock).')
+                  }}
+                >
+                  Deploy Now
+                </button>
+                <button
+                  type="button"
+                  className="rounded-lg bg-[#00BAF2] px-3 py-2 text-xs font-semibold text-white shadow-sm hover:bg-[#00a8d9]"
+                  onClick={() => {
+                    void navigator.clipboard.writeText(prUrl)
+                  }}
+                >
+                  Copy link
+                </button>
+              </div>
+            </>
+          ) : (
+            <p className="mt-2 text-sm text-slate-500">PR link appears when the job completes.</p>
+          )}
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700 shadow-sm">
+          <p>
+            <span className="text-slate-500">Deployment status:</span>{' '}
+            <span className="font-semibold text-[#002E7E]">
+              {task.pipelineStatus === 'CLOSED' || task.status === 'completed'
+                ? task.pipelineStatus === 'CLOSED'
+                  ? 'Build complete (closed)'
+                  : 'Deployed'
+                : task.status === 'failed'
+                  ? 'Failed'
+                  : 'Pending deployment…'}
+            </span>
+          </p>
+          {task.status === 'failed' ? (
+            <button
+              type="button"
+              className="rounded-lg bg-[#00BAF2] px-3 py-2 text-xs font-semibold text-white shadow-sm hover:bg-[#00a8d9]"
+              onClick={() => void retryTask(task.id)}
+            >
+              Retry pipeline
+            </button>
+          ) : null}
+        </div>
+      </div>
+    </section>
+  )
+}
+
+function shortId(id: string): string {
+  const compact = id.replace(/[^a-zA-Z0-9]/g, '')
+  return compact.slice(0, 10) || id.slice(0, 10)
+}

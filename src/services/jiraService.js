@@ -88,6 +88,74 @@ function validateIssueKey(issueKey) {
 export function createJiraService(config) {
   const authHeader = buildBasicAuthHeader(config.jiraEmail, config.jiraApiToken);
 
+  async function diagnoseForbidden(issueKey) {
+    const headers = {
+      Authorization: authHeader,
+      Accept: 'application/json',
+    };
+    const myselfUrl = `${config.jiraBaseUrl}/rest/api/3/myself`;
+    const searchUrl = `${config.jiraBaseUrl}/rest/api/3/search`;
+    const result = {
+      myselfStatus: null,
+      searchStatus: null,
+      searchTotal: null,
+      reason: null,
+    };
+
+    try {
+      const me = await getJiraHttp().get(myselfUrl, {
+        headers,
+        responseType: 'text',
+        transformResponse: [(data) => data],
+      });
+      result.myselfStatus = me.status;
+      if (me.status === 401) {
+        result.reason = 'auth_failed';
+        return result;
+      }
+    } catch {
+      result.reason = 'network_error';
+      return result;
+    }
+
+    try {
+      const search = await getJiraHttp().get(searchUrl, {
+        headers,
+        params: {
+          jql: `key = "${issueKey}"`,
+          maxResults: 1,
+          fields: 'summary,status',
+        },
+        responseType: 'text',
+        transformResponse: [(data) => data],
+      });
+      result.searchStatus = search.status;
+      let bodyJson = null;
+      if (typeof search.data === 'string' && search.data) {
+        try {
+          bodyJson = JSON.parse(search.data);
+        } catch {
+          bodyJson = null;
+        }
+      }
+      result.searchTotal =
+        bodyJson && typeof bodyJson === 'object' && Number.isInteger(bodyJson.total) ? bodyJson.total : null;
+      if (search.status === 401) {
+        result.reason = 'auth_failed';
+      } else if (search.status === 403) {
+        result.reason = 'project_or_issue_permission_denied';
+      } else if (search.status >= 200 && search.status < 300 && result.searchTotal === 0) {
+        result.reason = 'issue_not_visible_or_not_found';
+      } else {
+        result.reason = 'issue_permission_denied';
+      }
+      return result;
+    } catch {
+      result.reason = 'network_error';
+      return result;
+    }
+  }
+
   async function getIssue(issueKeyRaw) {
     const issueKey = validateIssueKey(issueKeyRaw);
     const url = `${config.jiraBaseUrl}/rest/api/3/issue/${encodeURIComponent(issueKey)}`;
@@ -137,11 +205,19 @@ export function createJiraService(config) {
     }
 
     if (httpStatus === 403) {
-      logger.error('jira.forbidden', { url, status: httpStatus });
+      const diag = await diagnoseForbidden(issueKey);
+      logger.error('jira.forbidden', { url, status: httpStatus, diagnostics: diag });
+      if (diag.reason === 'auth_failed') {
+        throw new JiraServiceError(
+          'UNAUTHORIZED',
+          'Jira authentication failed for this domain. Verify JIRA_DOMAIN, JIRA_EMAIL, and JIRA_API_TOKEN.',
+          { status: httpStatus, jira: bodyJson, diagnostics: diag },
+        );
+      }
       throw new JiraServiceError(
         'FORBIDDEN',
-        'Jira returned 403 Forbidden. The user may lack browse permission for this issue.',
-        { status: httpStatus, jira: bodyJson },
+        'Jira returned 403. Credentials are accepted, but this user cannot access the issue (Browse Projects / issue security).',
+        { status: httpStatus, jira: bodyJson, diagnostics: diag },
       );
     }
 

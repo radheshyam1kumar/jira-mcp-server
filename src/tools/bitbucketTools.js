@@ -4,7 +4,9 @@ import {
   TICKET_KEY_PATTERN,
   createBitbucketService,
 } from '../services/bitbucketService.js';
+import { pipelineTracker } from '../services/pipelineTracker.js';
 import { logger } from '../utils/logger.js';
+import { normalizeIssueKey } from '../utils/issueKey.js';
 
 function formatToolJson(payload) {
   return JSON.stringify(payload, null, 2);
@@ -37,8 +39,29 @@ function repoOverrideFromInput(input) {
   return Object.keys(o).length ? o : undefined;
 }
 
+function resolvePipelineIssueKey(issueKey, branch) {
+  void branch;
+  return normalizeIssueKey(issueKey);
+}
+
+function prUrlFromCreateOut(out, bbCfg) {
+  const html = out?.links?.html;
+  let href;
+  if (html && typeof html === 'object' && !Array.isArray(html) && html.href) href = html.href;
+  else if (Array.isArray(html) && html[0]?.href) href = html[0].href;
+  if (href) return String(href);
+  const id = out?.pullRequestId;
+  const ws = bbCfg?.workspace;
+  const slug = bbCfg?.repoSlug;
+  if (typeof id === 'number' && ws && slug) {
+    return `https://bitbucket.org/${ws}/${slug}/pull-requests/${id}`;
+  }
+  return '';
+}
+
 export function registerBitbucketTools(mcpServer, bitbucketConfig) {
   const bb = bitbucketConfig ? createBitbucketService(bitbucketConfig) : null;
+  const bbCfg = bitbucketConfig;
 
   function guard() {
     if (!bb) return notConfiguredPayload();
@@ -70,13 +93,29 @@ export function registerBitbucketTools(mcpServer, bitbucketConfig) {
       logger.toolCall('bitbucket_ensure_ticket_branch', { ticketKey: input.ticketKey });
       const err = guard();
       if (err) return { content: [{ type: 'text', text: formatToolJson(err) }], isError: true };
+      const tk = normalizeIssueKey(input.ticketKey);
+      if (tk) {
+        await pipelineTracker.ensure(tk);
+        await pipelineTracker.log(tk, 'Ensuring Bitbucket ticket feature branch…');
+        await pipelineTracker.stage(tk, 'DEVELOPMENT', 'IN_PROGRESS');
+      }
       try {
         const out = await bb.ensureTicketFeatureBranch(
           { ticketKey: input.ticketKey, baseBranch: input.baseBranch },
           repoOverrideFromInput(input),
         );
+        if (tk) {
+          const slug = out?.repoSlug || bbCfg?.repoSlug || '';
+          if (slug) await pipelineTracker.setRepository(tk, String(slug));
+          await pipelineTracker.stage(tk, 'DEVELOPMENT', 'SUCCESS');
+          await pipelineTracker.log(tk, 'Ticket feature branch is ready.');
+        }
         return { content: [{ type: 'text', text: formatToolJson(out) }] };
       } catch (e) {
+        if (tk) {
+          const msg = e instanceof Error ? e.message : String(e);
+          await pipelineTracker.fail(tk, `Development (branch): ${msg}`);
+        }
         return handleBitbucketError(e, 'bitbucket_ensure_ticket_branch');
       }
     },
@@ -119,6 +158,10 @@ export function registerBitbucketTools(mcpServer, bitbucketConfig) {
         files: z
           .record(z.string(), z.string())
           .describe('Map of repo-relative path → file content (string). Example: { "src/foo.txt": "hello" }'),
+        issueKey: z
+          .string()
+          .regex(TICKET_KEY_PATTERN)
+          .describe('Jira key for pipeline tracking (e.g. IPG-1096).'),
         ...optionalRepo,
       },
     },
@@ -126,13 +169,27 @@ export function registerBitbucketTools(mcpServer, bitbucketConfig) {
       logger.toolCall('bitbucket_commit_files', { branch: input.branch, paths: Object.keys(input.files || {}) });
       const err = guard();
       if (err) return { content: [{ type: 'text', text: formatToolJson(err) }], isError: true };
+      const tk = resolvePipelineIssueKey(input.issueKey, input.branch);
+      if (tk) {
+        await pipelineTracker.ensure(tk);
+        await pipelineTracker.log(tk, 'Committing files via Bitbucket API…');
+        await pipelineTracker.stage(tk, 'COMMIT', 'IN_PROGRESS');
+      }
       try {
         const out = await bb.commitFiles(
           { branch: input.branch, message: input.message, files: input.files },
           repoOverrideFromInput(input),
         );
+        if (tk) {
+          await pipelineTracker.stage(tk, 'COMMIT', 'SUCCESS');
+          await pipelineTracker.log(tk, 'Commit completed on Bitbucket.');
+        }
         return { content: [{ type: 'text', text: formatToolJson(out) }] };
       } catch (e) {
+        if (tk) {
+          const msg = e instanceof Error ? e.message : String(e);
+          await pipelineTracker.fail(tk, `Commit: ${msg}`);
+        }
         return handleBitbucketError(e, 'bitbucket_commit_files');
       }
     },
@@ -153,6 +210,10 @@ export function registerBitbucketTools(mcpServer, bitbucketConfig) {
           .boolean()
           .optional()
           .describe('If true, close source branch after merge (when merged via Bitbucket)'),
+        issueKey: z
+          .string()
+          .regex(TICKET_KEY_PATTERN)
+          .describe('Jira key for pipeline tracking.'),
         ...optionalRepo,
       },
     },
@@ -160,6 +221,12 @@ export function registerBitbucketTools(mcpServer, bitbucketConfig) {
       logger.toolCall('bitbucket_create_pull_request', { source: input.source, destination: input.destination });
       const err = guard();
       if (err) return { content: [{ type: 'text', text: formatToolJson(err) }], isError: true };
+      const tk = resolvePipelineIssueKey(input.issueKey, input.source);
+      if (tk) {
+        await pipelineTracker.ensure(tk);
+        await pipelineTracker.log(tk, 'Creating pull request on Bitbucket…');
+        await pipelineTracker.stage(tk, 'RAISE_PR', 'IN_PROGRESS');
+      }
       try {
         const out = await bb.createPR(
           {
@@ -171,8 +238,18 @@ export function registerBitbucketTools(mcpServer, bitbucketConfig) {
           },
           repoOverrideFromInput(input),
         );
+        if (tk) {
+          const url = prUrlFromCreateOut(out, bbCfg);
+          if (url) await pipelineTracker.setPrUrl(tk, url);
+          else await pipelineTracker.stage(tk, 'RAISE_PR', 'SUCCESS');
+          await pipelineTracker.log(tk, 'Pull request created.');
+        }
         return { content: [{ type: 'text', text: formatToolJson(out) }] };
       } catch (e) {
+        if (tk) {
+          const msg = e instanceof Error ? e.message : String(e);
+          await pipelineTracker.fail(tk, `Raise PR: ${msg}`);
+        }
         return handleBitbucketError(e, 'bitbucket_create_pull_request');
       }
     },
@@ -238,6 +315,10 @@ export function registerBitbucketTools(mcpServer, bitbucketConfig) {
           .optional()
           .describe('Merge strategy (default merge_commit)'),
         closeSourceBranch: z.boolean().optional().describe('Whether to close the source branch after merge'),
+        issueKey: z
+          .string()
+          .regex(TICKET_KEY_PATTERN)
+          .describe('Jira key for pipeline tracking (e.g. IPG-1096).'),
         ...optionalRepo,
       },
     },
@@ -245,6 +326,12 @@ export function registerBitbucketTools(mcpServer, bitbucketConfig) {
       logger.toolCall('bitbucket_merge_pull_request', { prId: input.prId });
       const err = guard();
       if (err) return { content: [{ type: 'text', text: formatToolJson(err) }], isError: true };
+      const tk = resolvePipelineIssueKey(input.issueKey);
+      if (tk) {
+        await pipelineTracker.ensure(tk);
+        await pipelineTracker.log(tk, 'Merging pull request on Bitbucket…');
+        await pipelineTracker.stage(tk, 'MERGED_PR', 'IN_PROGRESS');
+      }
       try {
         const out = await bb.mergePR(
           input.prId,
@@ -254,8 +341,16 @@ export function registerBitbucketTools(mcpServer, bitbucketConfig) {
           },
           repoOverrideFromInput(input),
         );
+        if (tk) {
+          await pipelineTracker.stage(tk, 'MERGED_PR', 'SUCCESS');
+          await pipelineTracker.log(tk, 'Pull request merged.');
+        }
         return { content: [{ type: 'text', text: formatToolJson(out) }] };
       } catch (e) {
+        if (tk) {
+          const msg = e instanceof Error ? e.message : String(e);
+          await pipelineTracker.fail(tk, `Merge PR: ${msg}`);
+        }
         return handleBitbucketError(e, 'bitbucket_merge_pull_request');
       }
     },

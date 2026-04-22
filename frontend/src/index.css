@@ -1,0 +1,26 @@
+@import 'tailwindcss';
+
+/* Paytm-inspired brand tokens (dashboard shell) */
+:root {
+  --paytm-navy: #002e7e;
+  --paytm-cyan: #00baf2;
+  --paytm-page: #f5f7f9;
+  --paytm-card: #ffffff;
+  --paytm-border: #e2e8f0;
+  --paytm-text: #1f2937;
+  --paytm-muted: #64748b;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue',
+    Arial, sans-serif;
+  background: var(--paytm-page);
+  color: var(--paytm-text);
+}
