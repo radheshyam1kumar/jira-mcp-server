@@ -1,4 +1,4 @@
-import type { PipelineStageRow } from './jiraTicket'
+import type { JiraTicketCostSummary, PipelineRunDto, PipelineStageRow } from './jiraTicket'
 
 export type TaskStatus = 'pending' | 'running' | 'completed' | 'failed'
 
@@ -17,4 +17,9 @@ export interface Task {
   stages?: PipelineStageRow[]
   jiraStatus?: string
   activityLogs?: string[]
+  cost?: JiraTicketCostSummary
+  /** Which Claude models wrote code (from API or derived from `pipelineRuns`). */
+  codegenModels?: string[]
+  pipelineRuns?: PipelineRunDto[]
+  pipelineRunCount?: number
 }

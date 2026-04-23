@@ -2,14 +2,14 @@ import axios from 'axios';
 import FormData from 'form-data';
 import { buildBasicAuthHeader } from '../utils/auth.js';
 import { logger } from '../utils/logger.js';
+import { TICKET_KEY_PATTERN } from '../utils/issueKey.js';
 
 const API_BASE = 'https://api.bitbucket.org/2.0';
 
 /** Form/meta field names that collide with repo paths if sent without disambiguation. */
 const RESERVED_SRC_FIELD_NAMES = new Set(['message', 'branch', 'author', 'parents', 'files']);
 
-/** Jira-style keys, e.g. IPG-754 — used for `{KEY}-dev` feature branches. */
-export const TICKET_KEY_PATTERN = /^[A-Za-z][A-Za-z0-9]*-\d+$/;
+export { TICKET_KEY_PATTERN };
 
 export class BitbucketServiceError extends Error {
   constructor(code, message, details = {}) {

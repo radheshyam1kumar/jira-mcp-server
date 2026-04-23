@@ -1,3 +1,5 @@
+import { formatCodegenModelsLabel } from '../lib/codegenModels'
+import { formatTokens, formatUsd } from '../lib/formatLlmCost'
 import type { Task } from '../types/task'
 import { ProgressBar } from './ProgressBar'
 import { StatusBadge } from './StatusBadge'
@@ -36,6 +38,20 @@ export function TaskCard({
         <ProgressBar value={task.progress} />
         <p className="mt-1.5 text-[11px] font-medium uppercase tracking-wide text-slate-400">
           [{(task.pipelineStatus ?? task.status).toString().toUpperCase()}]
+        </p>
+        <p className="mt-2 text-[11px] leading-snug text-slate-600" title="LLM token usage and estimated cost (all runs)">
+          <span className="font-semibold text-[#002E7E]">LLM</span>{' '}
+          {formatTokens(task.cost?.total_tokens ?? 0)} tok · {formatUsd(task.cost?.all_runs_usd ?? 0)}
+          {typeof task.pipelineRunCount === 'number' && task.pipelineRunCount > 0 ? (
+            <span className="text-slate-400"> · {task.pipelineRunCount} run(s)</span>
+          ) : null}
+        </p>
+        <p
+          className="mt-1.5 truncate text-[11px] leading-snug text-slate-600"
+          title="Models used for code-writing LLM phases (implement, code, …)"
+        >
+          <span className="font-semibold text-[#002E7E]">Code</span>{' '}
+          <span className="font-mono text-slate-800">{formatCodegenModelsLabel(task.codegenModels)}</span>
         </p>
       </div>
     </button>

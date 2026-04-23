@@ -1,3 +1,4 @@
+import { codegenModelsFromPipelineRuns } from '../lib/codegenModels'
 import type { Task, TaskStatus } from '../types/task'
 import type { JiraTicketDto } from '../types/jiraTicket'
 import type { TaskAPI } from '../types/taskApi'
@@ -52,6 +53,13 @@ function mapTicketToTask(t: JiraTicketDto): Task {
     jiraStatus: t.jiraStatus,
     activityLogs: Array.isArray(t.activityLogs) ? t.activityLogs.map(formatLogLine) : undefined,
     pipelineStatus: t.currentStatus,
+    cost: t.cost,
+    codegenModels:
+      Array.isArray(t.codegenModels) && t.codegenModels.length > 0
+        ? t.codegenModels
+        : codegenModelsFromPipelineRuns(Array.isArray(t.pipelineRuns) ? t.pipelineRuns : undefined),
+    pipelineRuns: Array.isArray(t.pipelineRuns) ? t.pipelineRuns : undefined,
+    pipelineRunCount: typeof t.pipelineRunCount === 'number' ? t.pipelineRunCount : undefined,
   }
 }
 

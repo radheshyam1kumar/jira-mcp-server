@@ -10,9 +10,14 @@ function secretHeaders() {
   return h;
 }
 
+/**
+ * @returns {Promise<{ ok: true, ticket: unknown } | { ok: false, status?: number, error: string }>}
+ */
 async function sendEvent(payload) {
   const issueKey = normalizeIssueKey(payload.issueKey);
-  if (!issueKey) return;
+  if (!issueKey) {
+    return { ok: false, error: 'invalid_issue_key' };
+  }
   const body = { ...payload, issueKey };
   try {
     const url = `${BASE}/api/internal/jira-pipeline/event`;
@@ -29,13 +34,18 @@ async function sendEvent(payload) {
         issueKey,
         body: text.slice(0, 500),
       });
+      return { ok: false, status: res.status, error: text.slice(0, 500) || `HTTP ${res.status}` };
     }
+    const ticket = await res.json().catch(() => null);
+    return { ok: true, ticket };
   } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
     logger.warn('pipeline_tracker.unreachable', {
       issueKey,
       type: body.type,
-      message: e instanceof Error ? e.message : String(e),
+      message,
     });
+    return { ok: false, error: message };
   }
 }
 
@@ -83,5 +93,20 @@ export const pipelineTracker = {
   },
   deploySuccess(issueKey) {
     return sendEvent({ type: 'DEPLOY_SUCCESS', issueKey });
+  },
+  /**
+   * Persist Anthropic usage for a logical SDLC phase (tokens accumulate across calls in the same phase).
+   * @param {string} issueKey
+   * @param {{ phase: string, model?: string, llmResponse?: unknown, usage?: { input_tokens?: number, output_tokens?: number } }} payload
+   */
+  recordLlmUsage(issueKey, payload) {
+    return sendEvent({
+      type: 'LLM_USAGE',
+      issueKey,
+      phase: payload?.phase,
+      model: payload?.model,
+      llmResponse: payload?.llmResponse ?? null,
+      usage: payload?.usage ?? null,
+    });
   },
 };

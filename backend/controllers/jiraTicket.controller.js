@@ -10,10 +10,16 @@ function shouldResetPipelineForStaleCompletion(existing) {
 
 function toListShape(t) {
   if (!t) return t;
-  const { activityLogs, ...rest } = t;
+  const { activityLogs, pipelineRuns, ...rest } = t;
   return {
     ...rest,
     activityLogCount: Array.isArray(activityLogs) ? activityLogs.length : 0,
+    pipelineRunCount:
+      typeof t.cost?.run_count === 'number'
+        ? t.cost.run_count
+        : Array.isArray(pipelineRuns)
+          ? pipelineRuns.length
+          : 0,
   };
 }
 
@@ -115,7 +121,8 @@ export async function postPipelineEvent(req, res, next) {
           key,
           'New development cycle — pipeline reset to Development (PR history and logs preserved).',
         );
-        out = await repo.resetStagesForNewDevelopmentCycle(key);
+        await repo.resetStagesForNewDevelopmentCycle(key);
+        out = await repo.startNewPipelineRun(key);
         break;
       }
       case 'JIRA_FETCHED': {
@@ -127,6 +134,7 @@ export async function postPipelineEvent(req, res, next) {
             'Jira refreshed while pipeline was fully complete — resetting stages for a new cycle (PR history and logs preserved).',
           );
           await repo.resetStagesForNewDevelopmentCycle(key);
+          await repo.startNewPipelineRun(key);
         }
         await repo.appendActivityLog(key, 'Jira ticket metadata loaded.');
         await repo.setJiraIssueFields(key, {
@@ -172,6 +180,27 @@ export async function postPipelineEvent(req, res, next) {
           out = await repo.getTicketByIssueKey(key);
         }
         break;
+      case 'LLM_USAGE': {
+        await repo.ensureTicketDocument(key);
+        const phase = String(body.phase || '').trim();
+        if (!phase) {
+          res.status(400).json({ message: 'phase is required (e.g. implement, plan).' });
+          return;
+        }
+        const model = String(body.model || 'claude-sonnet-4-6').trim();
+        try {
+          out = await repo.appendLlmPhaseUsage(key, {
+            phase,
+            model,
+            llmResponse: body.llmResponse ?? body.response ?? null,
+            usage: body.usage ?? null,
+          });
+        } catch (e) {
+          next(e instanceof Error ? e : new Error(String(e)));
+          return;
+        }
+        break;
+      }
       default:
         res.status(400).json({ message: `Unknown event type: ${type}` });
         return;

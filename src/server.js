@@ -10,6 +10,7 @@ import { registerJiraGetIssueTools } from './tools/jiraGetIssueTools.js';
 import { registerJenkinsDeploymentTools } from './tools/jenkinsDeploymentTools.js';
 import { registerBitbucketTools } from './tools/bitbucketTools.js';
 import { registerJenkinsBuildTools } from './tools/jenkinsBuildTools.js';
+import { registerPipelineDashboardTools } from './tools/pipelineDashboardTools.js';
 
 const jiraToolRegistrars = [
   registerJiraGetIssueTools,
@@ -17,7 +18,7 @@ const jiraToolRegistrars = [
 ];
 
 const SERVER_INSTRUCTIONS =
-  'Jira Cloud + optional Jenkins + optional Bitbucket Cloud. Pipeline dashboard: tools update Firestore via the backend when PIPELINE_API_BASE_URL points at the Express API (default http://127.0.0.1:4001); set PIPELINE_INTERNAL_SECRET to match the API. Jira: jira_get_issue (registers/updates ticket), jira_get_attachments_content (optional issueKey for logs). Jenkins build: pass issueKey on jenkins_run_build — successful build marks the Jira ticket CLOSED in the dashboard. Jenkins: jenkins_prepare_build then jenkins_run_build with mergedPayload/repoKey/issueKey; jenkins_get_build_console. Jenkins deploy: jenkins_prepare_deployment / jenkins_run_deployment (optional issueKey). Bitbucket: bitbucket_ensure_ticket_branch, bitbucket_commit_files (issueKey optional if branch is like IPG-1096-dev), bitbucket_create_pull_request / bitbucket_merge_pull_request (pass issueKey when known for stage updates).';
+  'Jira Cloud + optional Jenkins + optional Bitbucket Cloud. Pipeline dashboard: tools update Firestore via the backend when PIPELINE_API_BASE_URL points at the Express API (default http://127.0.0.1:4001); set PIPELINE_INTERNAL_SECRET to match the API. Jira: jira_get_issue (registers/updates ticket), jira_get_attachments_content (optional issueKey for logs). Dashboard (Cursor): repo root `.cursor/hooks.json` can run `jira-mcp-server/scripts/cursor-hook-after-agent-response.mjs` on `afterAgentResponse` to POST estimated LLM_USAGE (transcript growth + assistant text; not vendor-reported usage). For exact usage from an API/SDK, call jira_pipeline_record_llm_usage. After substantive coding, call jira_pipeline_mark_local_work (completed: development | commit). jira_pipeline_update_stage for any stage. Jenkins build: pass issueKey on jenkins_run_build — successful build marks the Jira ticket CLOSED in the dashboard. Jenkins: jenkins_prepare_build then jenkins_run_build with mergedPayload/repoKey/issueKey; jenkins_get_build_console. Jenkins deploy: jenkins_prepare_deployment / jenkins_run_deployment (optional issueKey). Bitbucket: bitbucket_ensure_ticket_branch, bitbucket_commit_files, bitbucket_create_pull_request / bitbucket_merge_pull_request (pass issueKey when known for stage updates).';
 
 function normalizeRuntimeSnapshot(rawConfig, sourcePath) {
   const config = rawConfig && typeof rawConfig === 'object' && !Array.isArray(rawConfig) ? rawConfig : {};
@@ -120,6 +121,7 @@ function createConfiguredMcpServer(config, bitbucketConfig) {
   );
 
   for (const register of jiraToolRegistrars) register(mcpServer, config);
+  registerPipelineDashboardTools(mcpServer);
   registerJenkinsBuildTools(mcpServer);
   registerJenkinsDeploymentTools(mcpServer);
   registerBitbucketTools(mcpServer, bitbucketConfig);

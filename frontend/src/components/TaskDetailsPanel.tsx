@@ -1,3 +1,5 @@
+import { formatCodegenModelsLabel } from '../lib/codegenModels'
+import { formatTokens, formatUsd } from '../lib/formatLlmCost'
 import { PIPELINE_STEPS, statusLineFromTask } from '../lib/pipeline'
 import type { Task } from '../types/task'
 import { useTaskLogs } from '../hooks/useTaskLogs'
@@ -96,6 +98,12 @@ function TaskDetailsBody({ task }: { task: Task }) {
               <span className="font-medium text-slate-800">{task.jiraStatus}</span>
             </p>
           ) : null}
+          <p className="basis-full sm:basis-auto">
+            <span className="text-slate-500">Code from LLM:</span>{' '}
+            <span className="font-mono font-medium text-slate-900">
+              {formatCodegenModelsLabel(task.codegenModels)}
+            </span>
+          </p>
           <p>
             <span className="text-slate-500">Job ID:</span>{' '}
             <span className="font-mono font-medium text-slate-800">{shortId(task.id)}</span>
@@ -104,6 +112,74 @@ function TaskDetailsBody({ task }: { task: Task }) {
       </header>
 
       <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
+        <div className="rounded-xl border border-slate-200 bg-gradient-to-br from-slate-50 to-sky-50/40 p-4">
+          <p className="text-xs font-semibold uppercase tracking-wide text-[#002E7E]">LLM tokens & cost</p>
+          <p className="mt-2 text-sm text-slate-700">
+            <span className="text-slate-500">Total tokens (all runs):</span>{' '}
+            <span className="font-mono font-semibold text-slate-900">
+              {formatTokens(task.cost?.total_tokens ?? 0)}
+            </span>
+          </p>
+          <p className="mt-1 text-sm text-slate-700">
+            <span className="text-slate-500">Total cost (est.):</span>{' '}
+            <span className="font-mono font-semibold text-slate-900">
+              {formatUsd(task.cost?.all_runs_usd ?? 0)}
+            </span>
+          </p>
+          <p className="mt-1 text-xs text-slate-500">
+            Runs: {task.cost?.run_count ?? task.pipelineRunCount ?? 0}. Updates when the orchestrator sends{' '}
+            <span className="font-mono">LLM_USAGE</span> to the pipeline API.
+          </p>
+          {task.pipelineRuns && task.pipelineRuns.length > 0 ? (
+            <div className="mt-4 space-y-4 border-t border-slate-200/80 pt-4">
+              {task.pipelineRuns.map((run, runIdx) => (
+                <div key={run.runId || `run-${runIdx}`} className="rounded-lg border border-slate-200 bg-white/90 p-3 text-sm">
+                  <div className="flex flex-wrap items-baseline justify-between gap-2">
+                    <p className="font-mono text-xs font-semibold text-[#002E7E]">
+                      Run {runIdx + 1}
+                      <span className="font-normal text-slate-500">
+                        {run.startedAt ? ` · ${run.startedAt.slice(0, 19)}` : ''}
+                        {run.completedAt ? ` → ${run.completedAt.slice(0, 19)}` : ' · open'}
+                      </span>
+                    </p>
+                    <p className="text-xs text-slate-600">
+                      {formatTokens(run.cost?.total_tokens ?? 0)} tok · {formatUsd(run.cost?.current_run_usd ?? 0)}
+                      <span className="text-slate-400"> (this run)</span>
+                    </p>
+                  </div>
+                  {run.phases && run.phases.length > 0 ? (
+                    <ul className="mt-2 space-y-1.5 border-t border-slate-100 pt-2 text-xs">
+                      {run.phases.map((ph) => (
+                        <li
+                          key={`${run.runId}-${ph.phase}-${ph.model}`}
+                          className="flex flex-wrap justify-between gap-x-3 gap-y-1 text-slate-700"
+                        >
+                          <span>
+                            <span className="font-medium text-slate-900">{ph.phase}</span>
+                            <span className="text-slate-400"> · </span>
+                            <span className="font-mono text-slate-600">{ph.model}</span>
+                          </span>
+                          <span className="font-mono text-slate-800">
+                            in {formatTokens(ph.usage?.prompt_tokens ?? 0)} / out{' '}
+                            {formatTokens(ph.usage?.completion_tokens ?? 0)} · {formatUsd(ph.cost_usd ?? 0)}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="mt-2 text-xs text-slate-500">No LLM usage recorded for this run yet.</p>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="mt-3 text-xs text-slate-500">
+              Open this job (detail poll loads full ticket) to see per-run phases when the backend stores{' '}
+              <span className="font-mono">pipelineRuns</span>.
+            </p>
+          )}
+        </div>
+
         <div className="rounded-xl border border-slate-200 bg-[#F5F7F9] p-4">
           <p className="text-xs font-semibold uppercase tracking-wide text-[#002E7E]">Current stage</p>
           <ol className="mt-3 grid gap-2 sm:grid-cols-2">

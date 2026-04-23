@@ -1,0 +1,29 @@
+{
+  "name": "jira_pipeline_update_stage",
+  "description": "Update any pipeline stage (STAGE event) for the dashboard.",
+  "arguments": {
+    "type": "object",
+    "properties": {
+      "issueKey": { "type": "string" },
+      "stageId": {
+        "type": "string",
+        "enum": [
+          "FETCH_JIRA",
+          "ANALYZE_JIRA",
+          "DEVELOPMENT",
+          "COMMIT",
+          "RAISE_PR",
+          "MERGED_PR",
+          "BUILD",
+          "DEPLOY"
+        ]
+      },
+      "stageStatus": {
+        "type": "string",
+        "enum": ["PENDING", "IN_PROGRESS", "SUCCESS", "FAILED"]
+      },
+      "description": { "type": "string" }
+    },
+    "required": ["issueKey", "stageId", "stageStatus"]
+  }
+}

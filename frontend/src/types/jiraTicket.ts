@@ -13,6 +13,37 @@ export interface JiraActivityLogLine {
   message: string
 }
 
+export interface PipelinePhaseUsageRow {
+  phase: string
+  model: string
+  usage: {
+    prompt_tokens: number
+    completion_tokens: number
+    total_tokens: number
+  }
+  cost_usd: number
+}
+
+export interface PipelineRunCost {
+  current_run_usd: number
+  all_runs_usd: number
+  total_tokens: number
+}
+
+export interface PipelineRunDto {
+  runId: string
+  startedAt: string
+  completedAt?: string | null
+  phases: PipelinePhaseUsageRow[]
+  cost: PipelineRunCost
+}
+
+export interface JiraTicketCostSummary {
+  all_runs_usd: number
+  total_tokens: number
+  run_count: number
+}
+
 export interface JiraTicketDto {
   _id: string
   issueKey: string
@@ -25,6 +56,11 @@ export interface JiraTicketDto {
   prUrls?: string[]
   activityLogs?: JiraActivityLogLine[]
   activityLogCount?: number
+  pipelineRunCount?: number
+  pipelineRuns?: PipelineRunDto[]
+  cost?: JiraTicketCostSummary
+  /** Models inferred from codegen-like LLM phases (see backend `codegenModels.js`). */
+  codegenModels?: string[]
   stages?: PipelineStageRow[]
   currentStatus: JiraTicketCurrentStatus
   currentStatusDescription?: string

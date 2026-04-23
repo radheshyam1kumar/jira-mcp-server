@@ -1,0 +1,17 @@
+{
+  "name": "jira_pipeline_record_llm_usage",
+  "description": "Record LLM token usage for a phase so dashboard cost/tokens update.",
+  "arguments": {
+    "type": "object",
+    "properties": {
+      "issueKey": { "type": "string" },
+      "phase": { "type": "string", "description": "e.g. development, plan" },
+      "model": { "type": "string" },
+      "input_tokens": { "type": "integer", "minimum": 0 },
+      "output_tokens": { "type": "integer", "minimum": 0 },
+      "prompt_tokens": { "type": "integer", "minimum": 0 },
+      "completion_tokens": { "type": "integer", "minimum": 0 }
+    },
+    "required": ["issueKey", "phase"]
+  }
+}

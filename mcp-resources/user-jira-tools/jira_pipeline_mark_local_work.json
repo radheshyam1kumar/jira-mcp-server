@@ -1,0 +1,17 @@
+{
+  "name": "jira_pipeline_mark_local_work",
+  "description": "Mark development or commit complete on the job dashboard when work was done locally (not via Bitbucket MCP). completed=commit advances through commit (and earlier stages).",
+  "arguments": {
+    "type": "object",
+    "properties": {
+      "issueKey": { "type": "string", "description": "Jira key e.g. PG-3478" },
+      "completed": {
+        "type": "string",
+        "enum": ["development", "commit"],
+        "description": "development after coding; commit after local git commit"
+      },
+      "note": { "type": "string", "description": "Optional activity log line" }
+    },
+    "required": ["issueKey", "completed"]
+  }
+}

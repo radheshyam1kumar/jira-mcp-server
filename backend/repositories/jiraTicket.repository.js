@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { FieldValue } from 'firebase-admin/firestore';
 import { db } from '../firebase.js';
 import {
@@ -5,6 +6,14 @@ import {
   PIPELINE_STAGE_DEFS,
   PIPELINE_STAGE_IDS,
 } from '../constants/pipelineStages.js';
+import {
+  calculatePhaseCost,
+  enrichPipelineRunsForApi,
+  extractUsage,
+  roundUsd,
+} from '../utils/llmCost.js';
+import { logger } from '../utils/logger.js';
+import { collectCodegenModelsFromRuns } from '../utils/codegenModels.js';
 
 const COLLECTION = 'jiraTickets';
 
@@ -29,6 +38,32 @@ function initialStages() {
   }));
 }
 
+function createNewPipelineRun() {
+  return {
+    runId: randomUUID(),
+    startedAt: new Date().toISOString(),
+    completedAt: null,
+    phases: [],
+  };
+}
+
+function normalizePipelineRuns(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((r) => ({
+    runId: typeof r?.runId === 'string' && r.runId ? r.runId : randomUUID(),
+    startedAt: typeof r?.startedAt === 'string' && r.startedAt ? r.startedAt : new Date().toISOString(),
+    completedAt: r?.completedAt == null || r.completedAt === '' ? null : String(r.completedAt),
+    phases: Array.isArray(r?.phases) ? r.phases : [],
+  }));
+}
+
+/** Last run index if it is still open (no completedAt), else -1. */
+function activeRunIndex(runs) {
+  if (!runs.length) return -1;
+  const last = runs[runs.length - 1];
+  return last.completedAt ? -1 : runs.length - 1;
+}
+
 function computeProgress(stages) {
   if (!Array.isArray(stages) || stages.length === 0) return 0;
   const success = stages.filter((s) => s.status === 'SUCCESS').length;
@@ -41,14 +76,21 @@ function allStagesSucceeded(stages) {
 
 export function serializeJiraTicket(data, id) {
   if (!data) return null;
-  const { createdAt, updatedAt, ...rest } = data;
+  const { createdAt, updatedAt, pipelineRuns: storedPipelineRuns, ...rest } = data;
   const stages = Array.isArray(data.stages) ? data.stages : initialStages();
   const prUrls = Array.isArray(data.prUrls)
     ? data.prUrls.map((x) => String(x || '').trim()).filter(Boolean)
     : data.prUrl
       ? [String(data.prUrl).trim()]
       : [];
-  return {
+  const rawRuns = Array.isArray(storedPipelineRuns) ? storedPipelineRuns : [];
+  const { runs: pipelineRuns, taskCost } = enrichPipelineRunsForApi(rawRuns);
+  const cost = {
+    all_runs_usd: taskCost.all_runs_usd,
+    total_tokens: taskCost.total_tokens,
+    run_count: taskCost.run_count,
+  };
+  const base = {
     _id: id,
     ...rest,
     issueKey: id,
@@ -56,9 +98,15 @@ export function serializeJiraTicket(data, id) {
     prUrls,
     prUrl: prUrls[0] || '',
     progress: typeof data.progress === 'number' ? data.progress : computeProgress(stages),
+    cost,
+    codegenModels: collectCodegenModelsFromRuns(rawRuns),
     ...(createdAt !== undefined ? { createdAt: timestampToIso(createdAt) } : {}),
     ...(updatedAt !== undefined ? { updatedAt: timestampToIso(updatedAt) } : {}),
   };
+  if (rawRuns.length > 0) {
+    return { ...base, pipelineRuns };
+  }
+  return base;
 }
 
 function mergeStageStatuses(existingStages, stageId, status) {
@@ -150,6 +198,7 @@ export async function ensureTicketDocument(issueKey, userId = DEFAULT_USER_DOC_I
       prUrls: [],
       activityLogs: [],
       stages: initialStages(),
+      pipelineRuns: [createNewPipelineRun()],
       currentStatus: 'RUNNING',
       currentStatusDescription: '',
       progress: 0,
@@ -196,12 +245,170 @@ export async function patchTicket(issueKey, patch) {
   delete payload.issueKey;
   delete payload._id;
   delete payload.createdAt;
+  delete payload.pipelineRuns;
+  delete payload.cost;
+  delete payload.codegenModels;
   if (payload.stages) {
     payload.progress = computeProgress(payload.stages);
   }
   await ref.set(payload, { merge: true });
   const next = await ref.get();
   return serializeJiraTicket(next.data(), ref.id);
+}
+
+export async function closeActivePipelineRun(issueKey) {
+  const key = normalizeIssueKey(issueKey);
+  if (!key) return null;
+  const ref = db.collection(COLLECTION).doc(key);
+  const snap = await ref.get();
+  if (!snap.exists) return null;
+  const data = snap.data() || {};
+  const runs = normalizePipelineRuns(data.pipelineRuns);
+  if (!runs.length) return serializeJiraTicket(data, key);
+  const idx = activeRunIndex(runs);
+  if (idx === -1) return serializeJiraTicket(data, key);
+  const nextRuns = [...runs];
+  nextRuns[idx] = { ...nextRuns[idx], completedAt: new Date().toISOString() };
+  await ref.update({
+    pipelineRuns: nextRuns,
+    updatedAt: FieldValue.serverTimestamp(),
+  });
+  const out = await ref.get();
+  return serializeJiraTicket(out.data(), out.id);
+}
+
+async function syncPipelineRunWithTerminalStatus(issueKey) {
+  const key = normalizeIssueKey(issueKey);
+  if (!key) return;
+  const ref = db.collection(COLLECTION).doc(key);
+  const snap = await ref.get();
+  if (!snap.exists) return;
+  const st = snap.data()?.currentStatus;
+  if (st === 'CLOSED' || st === 'FAILED') {
+    await closeActivePipelineRun(key);
+  }
+}
+
+export async function startNewPipelineRun(issueKey) {
+  const key = normalizeIssueKey(issueKey);
+  if (!key) return null;
+  const ref = db.collection(COLLECTION).doc(key);
+  const snap = await ref.get();
+  if (!snap.exists) return null;
+  const data = snap.data() || {};
+  let runs = normalizePipelineRuns(data.pipelineRuns);
+  if (!runs.length) {
+    runs = [createNewPipelineRun()];
+  } else {
+    const idx = activeRunIndex(runs);
+    const nextRuns = [...runs];
+    if (idx !== -1) {
+      nextRuns[idx] = { ...nextRuns[idx], completedAt: new Date().toISOString() };
+    }
+    nextRuns.push(createNewPipelineRun());
+    runs = nextRuns;
+  }
+  await ref.update({
+    pipelineRuns: runs,
+    updatedAt: FieldValue.serverTimestamp(),
+  });
+  const out = await ref.get();
+  return serializeJiraTicket(out.data(), out.id);
+}
+
+/**
+ * Merge LLM usage into the active pipeline run for a logical phase (multiple calls accumulate).
+ * @param {string} issueKey
+ * @param {{ phase: string, model?: string, llmResponse?: unknown, usage?: Record<string, unknown> | null }} payload
+ */
+export async function appendLlmPhaseUsage(issueKey, payload) {
+  const key = normalizeIssueKey(issueKey);
+  if (!key) return null;
+  const phaseName = String(payload?.phase || '').trim();
+  if (!phaseName) {
+    throw new Error('appendLlmPhaseUsage: phase is required');
+  }
+  const ref = db.collection(COLLECTION).doc(key);
+
+  try {
+    await db.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      if (!snap.exists) return;
+      const data = snap.data() || {};
+      let runs = normalizePipelineRuns(data.pipelineRuns);
+      let idx = activeRunIndex(runs);
+      if (idx === -1) {
+        runs = [...runs, createNewPipelineRun()];
+        idx = runs.length - 1;
+      }
+      const current = runs[idx];
+      const phases = Array.isArray(current.phases)
+        ? current.phases.map((p) => ({
+            ...p,
+            usage: p?.usage
+              ? {
+                  prompt_tokens: Number(p.usage.prompt_tokens) || 0,
+                  completion_tokens: Number(p.usage.completion_tokens) || 0,
+                  total_tokens: Number(p.usage.total_tokens) || 0,
+                }
+              : { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+          }))
+        : [];
+
+      const delta =
+        payload.usage != null && typeof payload.usage === 'object'
+          ? extractUsage({ usage: payload.usage })
+          : extractUsage(payload.llmResponse ?? null);
+
+      const modelName =
+        String(payload.model || '').trim() ||
+        (() => {
+          const existing = phases.find((p) => p && p.phase === phaseName);
+          return (existing && existing.model) || 'claude-sonnet-4-6';
+        })();
+
+      const pi = phases.findIndex((p) => p && p.phase === phaseName);
+      if (pi >= 0) {
+        const u0 = phases[pi].usage;
+        const mergedUsage = {
+          prompt_tokens: (Number(u0.prompt_tokens) || 0) + delta.prompt_tokens,
+          completion_tokens: (Number(u0.completion_tokens) || 0) + delta.completion_tokens,
+          total_tokens: 0,
+        };
+        mergedUsage.total_tokens = mergedUsage.prompt_tokens + mergedUsage.completion_tokens;
+        phases[pi] = {
+          phase: phaseName,
+          model: modelName,
+          usage: mergedUsage,
+          cost_usd: roundUsd(calculatePhaseCost(mergedUsage, modelName)),
+        };
+      } else {
+        const mergedUsage = { ...delta };
+        phases.push({
+          phase: phaseName,
+          model: modelName,
+          usage: mergedUsage,
+          cost_usd: roundUsd(calculatePhaseCost(mergedUsage, modelName)),
+        });
+      }
+
+      const nextRuns = [...runs];
+      nextRuns[idx] = { ...current, phases };
+      tx.update(ref, {
+        pipelineRuns: nextRuns,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+    });
+  } catch (e) {
+    logger.error('jiraTicket.appendLlmPhaseUsage_failed', {
+      issueKey: key,
+      message: e instanceof Error ? e.message : String(e),
+    });
+    throw e;
+  }
+
+  const out = await ref.get();
+  return serializeJiraTicket(out.data(), out.id);
 }
 
 /**
@@ -272,6 +479,7 @@ export async function applyStageUpdate(issueKey, stageId, stageStatus, options =
         progress: 100,
         updatedAt: FieldValue.serverTimestamp(),
       });
+      await syncPipelineRunWithTerminalStatus(key);
       const closed = await ref.get();
       return serializeJiraTicket(closed.data(), closed.id);
     }
@@ -298,6 +506,7 @@ export async function applyStageUpdate(issueKey, stageId, stageStatus, options =
     }
   }
   await ref.update(updates);
+  await syncPipelineRunWithTerminalStatus(key);
   const next = await ref.get();
   return serializeJiraTicket(next.data(), next.id);
 }
@@ -320,6 +529,7 @@ export async function markFailed(issueKey, description) {
     progress: computeProgress(stages),
     updatedAt: FieldValue.serverTimestamp(),
   });
+  await syncPipelineRunWithTerminalStatus(key);
   const out = await ref.get();
   return serializeJiraTicket(out.data(), out.id);
 }
@@ -345,6 +555,9 @@ export async function markBuildClosed(issueKey) {
     progress,
     updatedAt: FieldValue.serverTimestamp(),
   });
+  if (closed) {
+    await syncPipelineRunWithTerminalStatus(key);
+  }
   const out = await ref.get();
   return serializeJiraTicket(out.data(), out.id);
 }

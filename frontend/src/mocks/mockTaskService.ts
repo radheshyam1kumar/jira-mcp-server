@@ -1,3 +1,4 @@
+import type { PipelineRunDto } from '../types/jiraTicket'
 import type { Task, TaskStatus } from '../types/task'
 import type { TaskAPI } from '../types/taskApi'
 
@@ -38,11 +39,37 @@ export class MockTaskService implements TaskAPI {
   }
 
   private seedInitialTasks(): void {
+    const t1Runs: PipelineRunDto[] = [
+      {
+        runId: 'mock-run-1',
+        startedAt: new Date(Date.now() - 3_600_000).toISOString(),
+        completedAt: null,
+        phases: [
+          {
+            phase: 'plan',
+            model: 'claude-sonnet-4-6',
+            usage: { prompt_tokens: 3_200, completion_tokens: 1_100, total_tokens: 4_300 },
+            cost_usd: 0.0261,
+          },
+          {
+            phase: 'implement',
+            model: 'claude-opus-4-6',
+            usage: { prompt_tokens: 28_000, completion_tokens: 9_200, total_tokens: 37_200 },
+            cost_usd: 1.11,
+          },
+        ],
+        cost: { current_run_usd: 1.1361, all_runs_usd: 1.1361, total_tokens: 41_500 },
+      },
+    ]
     const t1 = this.buildTask({
       id: 'PROJ-3423',
       name: 'Implement new feature',
       status: 'running',
       progress: 42,
+      cost: { all_runs_usd: 1.1361, total_tokens: 41_500, run_count: 1 },
+      codegenModels: ['claude-opus-4-6'],
+      pipelineRunCount: 1,
+      pipelineRuns: t1Runs,
     })
     const t2 = this.buildTask({
       id: 'PROJ-3310',
@@ -67,10 +94,13 @@ export class MockTaskService implements TaskAPI {
 
   private buildTask(partial: Omit<Task, 'createdAt' | 'updatedAt'> & Partial<Pick<Task, 'createdAt' | 'updatedAt'>>): Task {
     const ts = partial.createdAt ?? nowIso()
+    const cost = partial.cost ?? { all_runs_usd: 0, total_tokens: 0, run_count: 0 }
     return {
       createdAt: ts,
       updatedAt: partial.updatedAt ?? ts,
       ...partial,
+      cost,
+      pipelineRunCount: partial.pipelineRunCount ?? cost.run_count,
     }
   }
 
